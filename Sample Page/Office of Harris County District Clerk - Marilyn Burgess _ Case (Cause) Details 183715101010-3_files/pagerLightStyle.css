@@ -1,0 +1,103 @@
+.PagerContainerTable
+{
+	/*
+	border-right: #eeeeee 1px solid;
+	border-top: #eeeeee 1px solid;
+	border-left:#eeeeee 1px solid;
+	border-bottom: #eeeeee 1px solid;
+*/
+	color: #d1d1e1;
+	vertical-align: bottom;
+}
+.PagerInfoCell
+{
+	padding-left:5px;
+	padding-right:5px;
+	padding-bottom:5px;
+	white-space: nowrap;
+	background-color: #dddddd;
+	font-weight:normal;
+	vertical-align: bottom;
+	color:Black ;
+}
+.PagerInfoCell:link
+{
+	color: #ffcc66;
+	text-decoration: none;
+}
+.PagerInfoCell:visited
+{
+	color: #ffcc66;
+	text-decoration: none;
+}
+.PagerCurrentPageCell
+{
+	background-color: #dddddd;
+	vertical-align: bottom;
+	height: 15px;
+	padding-left:5px;
+	padding-right:5px;
+	padding-bottom:5px;
+	color:Black;
+}
+.PagerOtherPageCells
+{
+	vertical-align: bottom;
+	background-color: #f0f1f2;
+	height: 17px;
+	padding-left:5px;
+	padding-right:5px;
+	padding-bottom:5px;
+}
+.PagerSSCCells
+{
+	background-color: #dae6fb;
+	color:#ffffff;
+	font-weight:bold;
+	vertical-align: bottom;
+	height: 17px;
+	padding-left:5px;
+	padding-right:5px;
+	padding-bottom:5px;
+}
+.PagerHyperlinkStyle
+{
+	vertical-align: bottom;
+	height: 17px;
+}
+.PagerHyperlinkStyle:hover
+{
+	color: blue;
+	text-decoration: none;
+	vertical-align: bottom;
+	height: 17px;
+	font-weight:bold;
+	background-color: #dddddd;
+	
+}
+.PagerHyperlinkStyle:link
+{
+	text-decoration: none;
+}
+.PagerHyperlinkStyle:visited
+{
+	text-decoration: none;
+}
+.PagerHyperlinkStyle:active
+{
+	color: blue;
+	text-decoration: none;
+	vertical-align: bottom;
+	height: 17px;
+	background-color: #cccccc;
+	font-weight:bold;
+}
+
+/* Styles shared among both Main and Popup master pages. */
+
+.specialrequirements
+{
+    font-size: 13px;
+    font-weight: bold;
+    color: #08F;
+}

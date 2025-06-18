@@ -1,0 +1,578 @@
+﻿body
+{
+	font-family: Arial, Tahoma, Verdana, Times New Roman;
+	font-size: 12px;
+	font-weight: normal;
+	color: #3C3E48;
+	background-color: #eeeeee;
+}
+
+h1 {
+  color: #1A5F9C;
+  font-size: 16px;
+  font-weight: bold;
+  line-height: 16px;
+}
+
+.Welcome td
+{
+	font-size: 13px;
+	font-weight: bold;
+	padding-top: 10px;
+	padding-bottom: 10px;
+}
+.cd_skinmaster
+{
+	height: 100%;
+	background-color: #ffffff;
+	-moz-border-radius-bottomleft: 15px;
+	-moz-border-radius-bottomright: 15px;
+	-moz-border-radius-topleft: 3px;
+	-moz-border-radius-topright: 3px;
+	border: 20px solid #ffffff;
+}
+.cd_skinmaster td
+{
+/*	font-family: Arial, Tahoma, Verdana, Times New Roman; */
+	font-size: 13px;
+	color: #333333;
+}
+.cd_skinmaster h3
+{
+  color: #1A5F9C;
+}
+.skinmaster
+{
+	height: 100%;
+	background-color: #ffffff;
+	-moz-border-radius-bottomleft: 15px;
+	-moz-border-radius-bottomright: 15px;
+	-moz-border-radius-topleft: 3px;
+	-moz-border-radius-topright: 3px;
+	border: 20px solid #ffffff;
+}
+.skinmaster td
+{
+/*	font-family: Arial, Tahoma, Verdana, Times New Roman; */
+	font-size: 12px;
+	color: #333333;
+}
+.skinmaster h3
+{
+  color: #1A5F9C;
+}
+.maintable
+{
+	padding: 8px;
+	font-weight: bold;
+	border: 0px;
+	width: 100%;
+	
+}
+.maintable td
+{
+	text-align: left;
+}
+.button
+{
+	border: 1px solid #cccccc;
+	background-color: #dddddd;
+	color: #333333;
+	cursor: pointer;
+}
+
+.footer
+{
+	padding-top: 20px;
+}
+
+/*StyleSheet for Search Results*/
+
+.subhead
+{
+	font-weight: normal;
+	font-size: 9pt;
+	color: black;
+	font-style: normal;
+	font-family: Arial;
+}
+.searchResults
+{
+	background-color: #FFFFFF;
+}
+.resultHeader
+{
+	background-color: #ffffff;
+	border-bottom: 1px solid #DBDBDB;
+	border-left: solid 1px #DBDBDB;
+}
+.resultHeader td
+{
+	padding: 2px;
+	padding-left: 10px;
+	padding-right: 8px;
+}
+.searchBody
+{
+	border: 1px solid #eeeeee;
+}
+.TabContentBody
+{
+	padding: 0;
+	margin: 0;
+	border-bottom: 1px solid #86a7dd;
+	width: 98%;
+}
+.TabContentBody thead tr td
+{
+	background-color: #1B3D5C;
+	font-weight: bold;
+	color: #FFFFFF;
+	padding: 5px 8px;
+}
+.TabContentBody tr td
+{
+	text-align: left;
+	padding: 1px 6px;
+	white-space: normal; 
+    border-top: solid 1px #97b8ee;
+}
+
+.tabcontentlist
+{
+	padding: 0;
+	margin: 0;
+	width: 98%;
+}
+
+.searchBody td
+{
+	color: #333333;
+	padding-left: 5px;
+	padding-right: 3px;
+	padding-top: 8px;
+	padding-bottom: 8px;
+	font-size: 12px;
+}
+.yourbasket
+{
+	background-color: #f6f9fc;
+}
+.yourbasket td
+{
+	font-size: 11px;
+}
+
+.basket
+{
+	border: 1px solid #dddddd;
+}
+.basket td
+{
+	color: #333333;
+	padding-left: 3px;
+	padding-right: 3px;
+	padding-top: 3px;
+	padding-bottom: 3px;
+	font-size: 12px;
+}
+.updateprogess
+{
+	background-color: #ffffff;
+	padding-left: 20px;
+	padding-right: 20px;
+	padding-bottom: 5px;
+	padding-top: 5px;
+	border: 1px solid #4e8ebe;
+}
+.rowAlt
+{
+	background-color: #D3DEEF;
+}
+.PagerHolder
+{
+	vertical-align: bottom;
+	height: 22px;
+}
+.pagerPadding
+{
+	padding-right: 8px;
+	padding-left: 8px;
+	padding-bottom: 2px;
+	border: 1px solid #e6e6e6;
+	font-size: 12px;
+	background-color: #eeeeee;
+	position: relative;
+	margin: 2px;
+}
+a.pagerPadding:hover
+{
+	padding-right: 8px;
+	padding-left: 8px;
+	padding-bottom: 2px;
+	border: 1px solid #e6e6e6;
+	font-size: 18px;
+	background-color: #cccccc;
+	position: relative;
+	margin: 2px;
+	font-weight: bold;
+	color: #ffffff;
+}
+.pagerDisabled
+{
+	cursor: default;
+	text-decoration: none;
+	padding-right: 8px;
+	padding-left: 8px;
+	padding-bottom: 2px;
+	margin: 2px;
+	font-weight: bold;
+}
+.BlueBold
+{
+	color: Blue;
+	font-weight: bold;
+}
+/* Sets the style for unvisited links. */
+.TabContentBody a,  a:link {
+  color: #1A5F9C;
+  text-decoration: none;
+  font-weight: bold;
+}
+/* Sets the style for visited links. */
+.TabContentBody a:visited {
+  color: #1A5F9C;
+  text-decoration: none;
+}
+/* Sets the style for links on mouseover. */
+.TabContentBody a:hover {
+  color: #000;
+  text-decoration: none;
+  font-weight: bold;
+  cursor: pointer;
+}
+/* Sets the style for a link that has focus. */
+.TabContentBody a:focus {
+  color: #1A5F9C;
+}
+/* Sets the style for a link that is being activated/clicked. */
+.TabContentBody a:active {
+  color: #1A5F9C;
+}
+.documentActivities tr td
+{
+	font-weight: normal;
+	border: none;
+	font-size: 12px;
+}
+.spacer
+{
+	line-height: 8px;
+}
+.disclaimer
+{
+	font-size: .9em;
+	padding-bottom: 4px;
+}
+.cd_disclaimer
+{
+	font-size: 1.0em;
+	padding-bottom: 4px;
+}
+.ajax__tab_xp .ajax__tab_tab {
+    color: #1A5F9C;
+
+    /*DO NOT MERGE UP DO NOT MERGE UP DO NOT MERGE UP*/
+    /*height:100% !important;*/
+    box-sizing: unset;
+}
+.inWorkPlaceHolder
+{
+	font-size: 14pt;
+	text-align: center;
+	vertical-align: middle;
+	line-height: 300px;
+}
+.topTabRow
+{
+	width: 108px;
+}
+.bottomTabRow
+{
+	width: 108px;
+}
+.grid
+{
+	padding: 0;
+	margin: 0;
+	background-color: #ffffff;
+	border-bottom: 1px solid #86a7dd;
+	font-weight: normal;
+	font-size: 8pt;
+	white-space: normal; 
+}
+
+.cd_resultgrid
+{
+	padding: 0;
+	margin: 0;
+	width: 98%;
+	background-color: #ffffff;
+	border-bottom: 1px solid #DBDBDB;
+	border-left: solid 1px #DBDBDB;
+}
+.cd_resultgrid td
+{
+	border-left: 1px solid #ffffff;
+	border-right: 1px solid #ffffff;
+	border-bottom: 1px solid #DBDBDB;
+	padding: 4px 8px;
+	font-weight: normal;
+	font-size: 10pt;
+	white-space: normal; 
+}
+
+.resultgrid
+{
+	padding: 0;
+	margin: 0;
+	width: 98%;
+	background-color: #ffffff;
+	border-bottom: 1px solid #DBDBDB;
+	border-left: solid 1px #DBDBDB;
+}
+.resultgrid td
+{
+	border-left: 1px solid #ffffff;
+	border-right: 1px solid #ffffff;
+	border-bottom: 1px solid #DBDBDB;
+	padding: 4px 8px;
+	font-weight: normal;
+	font-size: 8pt;
+	white-space: normal; 
+}
+.resultgridheader td, .resultgridheaderlocked td
+{
+	background-color: #1B3D5C;
+	font-weight: bold;
+	color: #FFFFFF;
+}
+.resultgridheaderlocked
+{
+	position:relative;
+	/*IE5+ only*/
+	top: expression(offsetParent.scrollTop-2);
+}
+.overflowContainer
+{
+	position: relative;
+	overflow: auto;
+	/*width: 855px;
+	height: 90%;*/
+	clear: both;
+}
+/*.overflowContainer table
+{
+	width: 826px;
+}
+.overflowContainer div
+{
+	width: auto;
+}
+.overflowContainer table table
+{
+	width: auto;
+}*/
+
+.modaldialogbackground
+{
+	background-image: url( '../../images/popup_top_bg.jpg' );
+	background-repeat: repeat-x;
+	border-bottom: 1px solid #bbbbbb;
+	padding-left: 10px;
+	text-align: left;
+	font-size: 12px;
+}
+
+.AccordionText
+{
+	color:White;
+	font-size:12pt;
+}
+.Accordion
+{
+	padding: 8px 0 8px 0px;
+	margin-top: 5px;
+	color: White;
+	font-family: Arial, Helvetica, sans-serif;
+	font-weight: bold;
+	font-size: 14px;
+	background-color: #29486A;
+}
+
+.Accordion_noPad
+{
+	margin-top: 5px;
+	color: White;
+	font-family: Arial, Helvetica, sans-serif;
+	font-weight: bold;
+	font-size: 12px;
+	background-color: #29486A;
+}
+
+.AccordionSelected
+{ 
+	padding: 8px 0 8px 0px;
+	margin-top: 5px;
+	color: White;
+	font-family: Arial, Helvetica, sans-serif;
+	font-weight: bold;
+	font-size: 14px;
+	background-color: #335984;
+}
+
+ .AccordionHighlight
+{
+	padding: 8px 0 8px 0px;
+	margin-top: 5px;
+	color: White;
+	font-family: Arial, Helvetica, sans-serif;
+	font-weight: bold;
+	font-size: 14px;
+	background-color: #29486A;
+}
+
+.accordionContent
+
+{
+    background-color: #D3DEEF;
+    border: 1px dashed #2F4F4F;
+    border-top: none;
+    padding: 5px;
+    padding-top: 10px;
+}
+
+h2 
+{
+	color: #1A5F9C;
+	font-size: 15px;
+	font-weight: bold;
+	padding: 3px 0px 9px 0px;
+	margin: 0;
+}
+
+p 
+{
+	color: #000;
+	font-family: Arial, Helvetica, sans-serif;
+	font-size: 12px;
+	font-weight: normal;
+	padding: 0;
+	margin: 0;
+}
+
+.button
+{
+	background-color: #ebebeb;
+	height: 26px;
+	text-align: center;	
+	vertical-align: middle;
+	font-family:Arial, Helvetica, sans-serif;
+	font-size: 12px;
+	font-weight: bold;
+	border: 1px solid #999;
+	color: #1A5F9C;
+	
+	cursor: pointer;
+}
+
+.lbtn
+{
+	 color: #FFFFFF;
+}
+
+.lbtn:visited
+{
+	 color: #FFFFFF;
+}
+
+.lbtn:link
+{
+	 color: #FFFFFF;
+}
+
+/* Sets the style for unvisited links. */
+a,  a:link {
+  color: #1A5F9C;
+  text-decoration: none;
+}
+/* Sets the style for visited links. */
+a:visited {
+  color: #1A5F9C;
+  text-decoration: none;
+}
+/* Sets the style for links on mouseover. */
+a:hover {
+  color: #000;
+  text-decoration: none;
+}
+/* Sets the style for a link that has focus. */
+a:focus {
+  color: #1A5F9C;
+}
+/* Sets the style for a link that is being activated/clicked. */
+a:active {
+  color: #1A5F9C;
+}
+
+a.externallink, a.externallink:visited
+{
+	color: white;
+	text-decoration: none;
+}
+
+a.externallink:hover
+{
+	color: #DEC4A1;
+}
+
+.basketinfo
+{
+	background-color: #f6f9fc;
+	width: 275px;
+	text-align: right;
+	padding: 0;
+	margin: 0;
+}
+
+.topmost
+{
+	z-index: 100;
+}
+
+.loginareaiframewide
+{
+	height: 24px;
+	width: 500px;
+}
+
+.loginareaiframenarrow
+{
+	height: 24px;
+	width: 380px;
+	border-style: none;
+}
+
+.popuplogin
+{
+    padding-top: 60px;
+	vertical-align: middle;
+	text-align: center;
+    padding-bottom: 60px;
+}
+
+.loginareamessage
+{
+    padding: 10px 10px;
+    font-size: 13px;
+}
