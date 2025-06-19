@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        body {
+            width: 300px;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            margin: 0;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        
+        .title {
+            font-size: 16px;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        .subtitle {
+            font-size: 12px;
+            color: #666;
+        }
+        
+        .status {
+            background: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            font-size: 14px;
+        }
+        
+        .controls {
+            margin-bottom: 15px;
+        }
+        
+        .control-group {
+            margin-bottom: 10px;
+        }
+        
+        label {
+            display: block;
+            font-size: 12px;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        label input[type="checkbox"] {
+            margin-right: 8px;
+        }
+        
+        input[type="range"] {
+            width: 100%;
+        }
+        
+        .delay-display {
+            text-align: center;
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
+        }
+        
+        .buttons {
+            display: flex;
+            gap: 10px;
+        }
+        
+        button {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        
+        .start-btn {
+            background: #4CAF50;
+            color: white;
+        }
+        
+        .start-btn:hover {
+            background: #45a049;
+        }
+        
+        .stop-btn {
+            background: #f44336;
+            color: white;
+        }
+        
+        .stop-btn:hover {
+            background: #da190b;
+        }
+        
+        .start-btn:disabled,
+        .stop-btn:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+        }
+        
+        .warning {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+            padding: 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="title">HCDC Auto Clicker</div>
+        <div class="subtitle">Harris County District Clerk</div>
+    </div>
+    
+    <div class="status" id="status">
+        <div>Status: <span id="statusText">Checking...</span></div>
+        <div id="caseNumber" style="display: none;">Case: <span id="caseNumberText">Unknown</span></div>
+        <div id="linkCount" style="display: none;">Links found: <span id="linkCountText">0</span></div>
+        <div id="progress" style="display: none;">Progress: <span id="progressText">0/0</span></div>
+    </div>
+    
+    <div class="controls">
+        <div class="control-group">
+            <label for="delaySlider">Click Delay (seconds):</label>
+            <input type="range" id="delaySlider" min="1" max="10" value="3" step="0.5">
+            <div class="delay-display" id="delayDisplay">3.0 seconds</div>
+        </div>
+        <div class="control-group">
+            <label>
+                <input type="checkbox" id="autoDownload" checked>
+                Auto-download PDFs
+            </label>
+        </div>
+    </div>
+    
+    <div class="buttons">
+        <button id="startBtn" class="start-btn">Start Auto Click</button>
+        <button id="stopBtn" class="stop-btn" disabled>Stop</button>
+    </div>
+    
+    <div class="buttons" style="margin-top: 10px;">
+        <button id="testBtn" style="background: #2196F3; color: white; padding: 8px; border: none; border-radius: 4px; cursor: pointer; width: 100%;">Test Link Detection</button>
+    </div>
+    
+    <div class="warning">
+        <strong>Note:</strong> This extension will automatically click on all document image links and download the PDFs to a subfolder in your Downloads folder named after the case number. Make sure you're on the correct page before starting.
+    </div>
+    
+    <script src="popup.js"></script>
+</body>
+</html> 

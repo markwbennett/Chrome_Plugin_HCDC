@@ -1,6 +1,10 @@
 # Harris County District Clerk Auto Clicker
 
-A Chrome extension that automatically clicks on document image links in Harris County District Clerk pages.
+Browser extensions that automatically download PDFs from Harris County District Clerk case details pages.
+
+**Available for:**
+- 🌐 **Chrome/Chromium** - Full-featured version with Chrome downloads API
+- 🧭 **Safari** - Safari Web Extension with native download handling
 
 ## Features
 
@@ -15,11 +19,19 @@ A Chrome extension that automatically clicks on document image links in Harris C
 
 ## Installation
 
+### Chrome Extension
+
 1. Download or clone this repository to your local machine
 2. Open Chrome and navigate to `chrome://extensions/`
 3. Enable "Developer mode" in the top right corner
-4. Click "Load unpacked" and select the folder containing the extension files
+4. Click "Load unpacked" and select the main folder containing the extension files
 5. The extension should now appear in your Chrome toolbar
+
+### Safari Extension
+
+1. Navigate to the `Safari_Extension/` folder
+2. Follow the installation instructions in `Safari_Extension/README.md`
+3. Enable the extension in Safari → Preferences → Extensions
 
 ## Usage
 
