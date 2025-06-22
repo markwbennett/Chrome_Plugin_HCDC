@@ -4,16 +4,37 @@ console.log('HCDC Auto Clicker background script loaded (Safari)');
 // Store case number for current download session
 let currentCaseNumber = 'unknown_case';
 
+// Track the current PDF tab to ensure only one is open at a time
+let currentPDFTabId = null;
+
 // Safari/WebKit compatible API detection
 const runtime = (typeof browser !== 'undefined') ? browser.runtime : chrome.runtime;
 const tabs = (typeof browser !== 'undefined') ? browser.tabs : chrome.tabs;
 const downloads = (typeof browser !== 'undefined') ? browser.downloads : chrome.downloads;
+
+// Function to close current PDF tab if one exists
+function closeCurrentPDFTab() {
+    return new Promise((resolve) => {
+        if (currentPDFTabId && tabs && tabs.remove) {
+            console.log('Closing current PDF tab:', currentPDFTabId);
+            tabs.remove(currentPDFTabId, () => {
+                currentPDFTabId = null;
+                resolve();
+            });
+        } else {
+            resolve();
+        }
+    });
+}
 
 // Listen for tab updates to handle ViewFilePage tabs
 if (tabs && tabs.onUpdated) {
     tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
         if (changeInfo.status === 'complete' && tab.url && tab.url.includes('ViewFilePage.aspx')) {
             console.log('ViewFilePage loaded:', tab.url);
+            
+            // Store this as the current PDF tab
+            currentPDFTabId = tabId;
             
             // Inject script to handle PDF download
             if (tabs.executeScript) {
@@ -93,12 +114,26 @@ if (tabs && tabs.onUpdated) {
     });
 }
 
+// Listen for tab removal to clear tracking
+if (tabs && tabs.onRemoved) {
+    tabs.onRemoved.addListener((tabId, removeInfo) => {
+        if (tabId === currentPDFTabId) {
+            console.log('Current PDF tab closed:', tabId);
+            currentPDFTabId = null;
+        }
+    });
+}
+
 // Handle messages from content script
 if (runtime && runtime.onMessage) {
     runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (request.action === 'downloadPDF') {
             console.log('Downloading PDF from URL:', request.url);
             console.log('Case number:', currentCaseNumber);
+            
+            // Note: Safari extension has limited duplicate checking capabilities
+            // Users should manually check for duplicate files in their Downloads folder
+            console.log('Note: Safari extension cannot automatically check for duplicate files');
             
             // Safari download handling
             if (downloads && downloads.download) {
@@ -136,6 +171,29 @@ if (runtime && runtime.onMessage) {
             currentCaseNumber = request.caseNumber;
             sendResponse({success: true});
             return true;
+        } else if (request.action === 'openPDFTab') {
+            console.log('Request to open PDF tab:', request.url);
+            
+            // Close current PDF tab first, then open new one
+            closeCurrentPDFTab().then(() => {
+                if (tabs && tabs.create) {
+                    tabs.create({
+                        url: request.url,
+                        active: false
+                    }).then(tab => {
+                        currentPDFTabId = tab.id;
+                        console.log('Opened new PDF tab:', tab.id);
+                        sendResponse({success: true, tabId: tab.id});
+                    }).catch(error => {
+                        console.log('Failed to open PDF tab:', error);
+                        sendResponse({success: false, error: error.message});
+                    });
+                } else {
+                    sendResponse({success: false, error: 'Tabs API not available'});
+                }
+            });
+            
+            return true; // Keep message channel open for async response
         }
     });
 }

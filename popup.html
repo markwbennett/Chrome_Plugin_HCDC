@@ -119,12 +119,14 @@
     <div class="header">
         <div class="title">HCDC Auto Clicker</div>
         <div class="subtitle">Harris County District Clerk</div>
+        <div class="version" id="versionDisplay" style="font-size: 10px; color: #999; margin-top: 3px;">v1.1</div>
     </div>
     
     <div class="status" id="status">
         <div>Status: <span id="statusText">Checking...</span></div>
         <div id="caseNumber" style="display: none;">Case: <span id="caseNumberText">Unknown</span></div>
         <div id="linkCount" style="display: none;">Links found: <span id="linkCountText">0</span></div>
+        <div id="pagination" style="display: none;">Pages: <span id="paginationText">Single page</span></div>
         <div id="progress" style="display: none;">Progress: <span id="progressText">0/0</span></div>
     </div>
     
@@ -152,7 +154,7 @@
     </div>
     
     <div class="warning">
-        <strong>Note:</strong> This extension will automatically click on all document image links and download the PDFs to a subfolder in your Downloads folder named after the case number. Make sure you're on the correct page before starting.
+        <strong>Note:</strong> This extension will automatically click on all document image links and download the PDFs to a subfolder in your Downloads folder named after the case number. The extension will skip downloads if the file already exists. Make sure you're on the correct page before starting.
     </div>
     
     <script src="popup.js"></script>

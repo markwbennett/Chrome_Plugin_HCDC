@@ -8,16 +8,28 @@ document.addEventListener('DOMContentLoaded', function() {
     const caseNumberText = document.getElementById('caseNumberText');
     const linkCount = document.getElementById('linkCount');
     const linkCountText = document.getElementById('linkCountText');
+    const pagination = document.getElementById('pagination');
+    const paginationText = document.getElementById('paginationText');
     const progress = document.getElementById('progress');
     const progressText = document.getElementById('progressText');
     const delaySlider = document.getElementById('delaySlider');
     const delayDisplay = document.getElementById('delayDisplay');
+    const versionDisplay = document.getElementById('versionDisplay');
 
     let statusInterval;
 
     // Safari/WebKit compatible API detection
     const runtime = (typeof browser !== 'undefined') ? browser.runtime : chrome.runtime;
     const tabs = (typeof browser !== 'undefined') ? browser.tabs : chrome.tabs;
+
+    // Load and display version from manifest
+    function loadVersion() {
+        const manifest = runtime.getManifest();
+        versionDisplay.textContent = `v${manifest.version}`;
+    }
+
+    // Load version on popup open
+    loadVersion();
 
     // Update delay display
     delaySlider.addEventListener('input', function() {
@@ -187,11 +199,17 @@ document.addEventListener('DOMContentLoaded', function() {
                         return;
                     }
                     
-                    if (response) {
-                        linkCountText.textContent = response.totalLinks;
-                        linkCount.style.display = 'block';
-                        
-                        if (response.isRunning) {
+                                    if (response) {
+                    linkCountText.textContent = response.totalLinks;
+                    linkCount.style.display = 'block';
+                    
+                    // Show pagination status
+                    if (response.hasNextPage !== undefined) {
+                        paginationText.textContent = response.hasNextPage ? 'Multi-page case' : 'Single page';
+                        pagination.style.display = 'block';
+                    }
+                    
+                    if (response.isRunning) {
                             startBtn.disabled = true;
                             stopBtn.disabled = false;
                             statusText.textContent = 'Running';
