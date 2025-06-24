@@ -414,11 +414,14 @@ async function checkExistingFiles(filename) {
 
 // Listen for download events to ensure proper file naming and location
 chrome.downloads.onDeterminingFilename.addListener(async (downloadItem, suggest) => {
+    console.log(`DEBUG [${new Date().toISOString()}]: onDeterminingFilename called for:`, downloadItem.url);
+    
     // Check if this is from the District Clerk site
     if (downloadItem.url && downloadItem.url.includes('hcdistrictclerk.com')) {
         console.log('District Clerk download detected:', downloadItem.filename);
         console.log('Original filename:', downloadItem.filename);
         console.log('Case number:', currentCaseNumber);
+        console.log('Current PDF tab ID:', currentPDFTabId);
         
         // Find document info for current PDF tab
         let docInfo = null;
@@ -693,10 +696,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true; // Keep message channel open for async response
     } else if (request.action === 'openPDFTabWithCallback') {
         const requestStartTime = Date.now();
-        console.log(`DEBUG [${new Date().toISOString()}]: Received openPDFTabWithCallback request`);
+        console.log(`DEBUG [${new Date().toISOString()}]: *** RECEIVED openPDFTabWithCallback request ***`);
         console.log(`DEBUG [${new Date().toISOString()}]: Request URL:`, request.url?.substring(0, 100) + '...');
         console.log(`DEBUG [${new Date().toISOString()}]: Document info:`, request.documentNumber, request.documentTitle);
         console.log(`DEBUG [${new Date().toISOString()}]: Case number:`, request.caseNumber);
+        console.log(`DEBUG [${new Date().toISOString()}]: Full request:`, request);
         
         // Validate URL
         if (!request.url || !request.url.startsWith('http')) {

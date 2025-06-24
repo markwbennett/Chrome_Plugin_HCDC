@@ -28,6 +28,15 @@
         return randomDelay;
     }
 
+    // Function to generate humanlike random pauses (1-3 seconds)
+    function getHumanlikeDelay() {
+        const minDelay = 1000; // 1 second
+        const maxDelay = 3000; // 3 seconds
+        const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+        console.log(`Humanlike delay: ${randomDelay}ms (range: ${minDelay}-${maxDelay}ms)`);
+        return randomDelay;
+    }
+
     // Function to generate session key for duplicate checking
     function generateSessionKey(caseNumber, docNumber, docTitle) {
         return `${caseNumber}|${docNumber}|${docTitle}`.toLowerCase();
@@ -235,6 +244,7 @@
             
             // Check for duplicates using session key
             const sessionKey = generateSessionKey(caseNumber, docInfo.number, docInfo.title);
+            console.log(`DEBUG: Generated session key: "${sessionKey}"`);
             
             if (processedDocuments.has(sessionKey)) {
                 console.log(`Skipping duplicate document: ${docInfo.number} - ${docInfo.title}`);
@@ -250,25 +260,45 @@
             console.log(`Processing document ${docInfo.number}: ${docInfo.title}`);
             console.log(`Opening URL: ${fullUrl.substring(0, 100)}...`);
 
-            // Send message to background script to open PDF tab
-            chrome.runtime.sendMessage({
-                action: 'openPDFTabWithCallback',
-                url: fullUrl,
-                documentNumber: docInfo.number,
-                documentTitle: docInfo.title,
-                caseNumber: caseNumber
-            }, (response) => {
-                if (response && response.success) {
-                    console.log(`Successfully processed document ${docInfo.number}: ${response.downloadSuccess ? 'Downloaded' : 'Skipped'}`);
-                    if (response.skipped) {
-                        console.log(`Document skipped: ${response.reason}`);
+            // Add humanlike pause before processing document
+            setTimeout(() => {
+                console.log(`DEBUG: Starting document processing after humanlike delay`);
+                
+                // Send message to background script to open PDF tab
+                console.log(`DEBUG: Sending message to background with:`, {
+                    action: 'openPDFTabWithCallback',
+                    documentNumber: docInfo.number,
+                    documentTitle: docInfo.title,
+                    caseNumber: caseNumber
+                });
+                
+                chrome.runtime.sendMessage({
+                    action: 'openPDFTabWithCallback',
+                    url: fullUrl,
+                    documentNumber: docInfo.number,
+                    documentTitle: docInfo.title,
+                    caseNumber: caseNumber
+                }, (response) => {
+                    console.log(`DEBUG: Received response for document ${docInfo.number}:`, response);
+                    
+                    if (chrome.runtime.lastError) {
+                        console.log(`DEBUG: Chrome runtime error:`, chrome.runtime.lastError);
+                        callback(false);
+                        return;
                     }
-                    callback(response.downloadSuccess || response.skipped);
-                } else {
-                    console.log(`Failed to process document ${docInfo.number}: ${response?.error || 'Unknown error'}`);
-                    callback(false);
-                }
-            });
+                    
+                    if (response && response.success) {
+                        console.log(`Successfully processed document ${docInfo.number}: ${response.downloadSuccess ? 'Downloaded' : 'Skipped'}`);
+                        if (response.skipped) {
+                            console.log(`Document skipped: ${response.reason}`);
+                        }
+                        callback(response.downloadSuccess || response.skipped);
+                    } else {
+                        console.log(`Failed to process document ${docInfo.number}: ${response?.error || 'Unknown error'}`);
+                        callback(false);
+                    }
+                });
+            }, getHumanlikeDelay());
         } catch (error) {
             console.error('Error processing document:', error);
             callback(false);
@@ -301,19 +331,22 @@
                 console.log(`Document ${docIndex} failed to process`);
             }
 
-            // Add random delay before processing next document
+            // Add humanlike delay before processing next document
             setTimeout(() => {
                 if (isRunning && currentIndex < documentLinks.length && activeDownloads < maxConcurrentDownloads) {
                     processNextDocument();
                 } else if (isRunning && currentIndex >= documentLinks.length && activeDownloads === 0) {
-                    // All documents processed, check for next page
-                    checkForNextPage();
+                    // All documents processed - NEXT PAGE FUNCTIONALITY COMMENTED OUT
+                    console.log('All documents on current page processed. Next page functionality disabled.');
+                    stopProcessing();
+                    // checkForNextPage(); // COMMENTED OUT
                 }
-            }, getRandomDelay());
+            }, getHumanlikeDelay());
         });
     }
 
-    // Function to check for next page
+    // Function to check for next page - COMMENTED OUT FOR SINGLE PAGE TESTING
+    /*
     function checkForNextPage() {
         const nextButton = findNextPageButton();
         
@@ -390,8 +423,10 @@
             stopProcessing();
         }
     }
+    */
 
-    // Function to check if new page has loaded
+        // Function to check if new page has loaded - COMMENTED OUT FOR SINGLE PAGE TESTING
+    /*
     function checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount = 0) {
         const currentUrl = window.location.href;
         const newLinks = findDocumentLinks();
@@ -425,11 +460,11 @@
             documentLinks = newLinks;
             currentIndex = 0;
             
-                    // Start processing documents on new page
-        console.log(`DEBUG: Starting to process ${Math.min(maxConcurrentDownloads, documentLinks.length)} documents concurrently`);
-        for (let i = 0; i < Math.min(maxConcurrentDownloads, documentLinks.length); i++) {
-            processNextDocument();
-        }
+            // Start processing documents on new page
+            console.log(`DEBUG: Starting to process ${Math.min(maxConcurrentDownloads, documentLinks.length)} documents concurrently`);
+            for (let i = 0; i < Math.min(maxConcurrentDownloads, documentLinks.length); i++) {
+                processNextDocument();
+            }
         } else {
             if (retryCount < 3) {
                 setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount + 1), getRandomDelay(500));
@@ -439,6 +474,7 @@
             }
         }
     }
+    */
 
     // Function to find next page button
     function findNextPageButton() {
@@ -522,8 +558,13 @@
             
             // Start processing documents after session is cleared
             console.log(`DEBUG: Starting to process ${Math.min(maxConcurrentDownloads, documentLinks.length)} documents concurrently`);
+            
+            // Process documents with humanlike delays between each
             for (let i = 0; i < Math.min(maxConcurrentDownloads, documentLinks.length); i++) {
-                processNextDocument();
+                setTimeout(() => {
+                    console.log(`DEBUG: Starting document ${i + 1} after humanlike delay`);
+                    processNextDocument();
+                }, i * getHumanlikeDelay()); // Humanlike delay between each document start
             }
         });
     }
