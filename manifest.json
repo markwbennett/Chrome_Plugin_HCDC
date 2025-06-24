@@ -24,7 +24,10 @@
     }
   ],
   "web_accessible_resources": [
-    "bridge.js"
+    {
+      "resources": ["bridge.js"],
+      "matches": ["*://*/*"]
+    }
   ],
   "action": {
     "default_popup": "popup.html",

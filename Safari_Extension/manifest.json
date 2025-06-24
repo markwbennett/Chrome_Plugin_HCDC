@@ -40,7 +40,9 @@
     },
     
     "web_accessible_resources": [
-        "popup.html",
-        "bridge.js"
+        {
+            "resources": ["popup.html", "bridge.js"],
+            "matches": ["*://*/*"]
+        }
     ]
 } 
