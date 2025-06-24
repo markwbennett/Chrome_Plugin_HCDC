@@ -11,12 +11,35 @@
     let baseClickDelay = 500; // Base delay in milliseconds
     let debugMode = false; // Debug mode flag
     
+    // Inject page bridge script once per page load
+    function ensurePageBridge() {
+        if (document.getElementById('hcdc-page-bridge')) return;
+        const s = document.createElement('script');
+        s.id = 'hcdc-page-bridge';
+        s.src = chrome.runtime.getURL('bridge.js');
+        (document.documentElement || document.head || document.body).appendChild(s);
+    }
+
+    // Ensure bridge is injected ASAP
+    ensurePageBridge();
+    
     // Track processed documents in this session to prevent duplicates
     let processedDocuments = new Set();
     
     // Track current page to prevent infinite loops
     let currentPageNumber = 1;
     let lastPageChangeTime = 0;
+
+    // Restore running state after page navigation
+    const persisted = (() => {
+        try { return JSON.parse(sessionStorage.getItem('hcdc_auto_click_state') || 'null'); } catch { return null; }
+    })();
+    if (persisted && persisted.active) {
+        debugMode = !!persisted.debugMode;
+        baseClickDelay = persisted.baseClickDelay || baseClickDelay;
+        if (debugMode) maxConcurrentDownloads = 1;
+        setTimeout(() => startProcessing(), 0); // start once helpers are defined
+    }
 
     // Function to generate random delay between min and max (inclusive)
     function getRandomDelay(baseDelay = baseClickDelay) {
@@ -52,11 +75,12 @@
             const debugLinks = [];
             if (links.length === 1) {
                 debugLinks.push(links[0]);
+                console.log(`Debug mode: Processing 1 document (only one available)`);
             } else if (links.length >= 2) {
                 debugLinks.push(links[0]); // First document
                 debugLinks.push(links[links.length - 1]); // Last document
+                console.log(`Debug mode: Processing 2 documents (first: ${extractDocumentInfo(links[0]).number}, last: ${extractDocumentInfo(links[links.length - 1]).number})`);
             }
-            console.log(`Debug mode: Processing ${debugLinks.length} documents (first and last only)`);
             return Array.from(debugLinks);
         }
         
@@ -122,51 +146,65 @@
         let docNumber = 'unknown';
         let docTitle = 'document';
         
-        // Try to find document number (usually in first few cells)
-        for (let i = 0; i < Math.min(3, cells.length); i++) {
-            const cellText = cells[i].textContent.trim();
-            if (cellText && /^\d+$/.test(cellText)) {
-                docNumber = cellText;
-                break;
-            }
-        }
-        
-        // Try to find document title with better logic
-        for (let i = 0; i < cells.length; i++) {
-            const cellText = cells[i].textContent.trim();
-            // Skip cells with just numbers, images, or javascript
-            if (cellText && 
-                cellText.length > 5 && 
-                !cellText.includes('javascript:') && 
-                !cellText.includes('Image') &&
-                !cellText.includes('View') &&
-                !/^\d+$/.test(cellText) &&
-                !cellText.includes('MM/DD/YYYY')) {
-                
-                // Clean up the title
-                docTitle = cellText
-                    .replace(/\s+/g, ' ')  // Replace multiple spaces with single space
-                    .replace(/[<>:"/\\|?*]/g, '_')  // Replace invalid filename characters
-                    .substring(0, 80)  // Limit length
-                    .trim();
-                
-                if (docTitle.length > 10) {
+        // First, extract document number from the link text itself (most reliable)
+        const linkText = link.textContent.trim();
+        const numberMatch = linkText.match(/\d{8,}/); // Look for 8+ digit numbers
+        if (numberMatch) {
+            docNumber = numberMatch[0];
+        } else {
+            // Fallback: try to find document number in cells
+            for (let i = 0; i < Math.min(3, cells.length); i++) {
+                const cellText = cells[i].textContent.trim();
+                if (cellText && /^\d{8,}$/.test(cellText)) {
+                    docNumber = cellText;
                     break;
                 }
             }
         }
         
-        // If we still don't have a good title, try to get it from the link text or nearby elements
-        if (docTitle === 'document' || docTitle.length < 10) {
-            const linkText = link.textContent.trim();
-            if (linkText && linkText.length > 5 && !linkText.includes('Image')) {
-                docTitle = linkText.substring(0, 50);
-            } else {
-                // Use a generic title with document number
-                docTitle = `Document_${docNumber}`;
+        // Extract document title from the link's title attribute (most reliable)
+        const titleAttr = link.getAttribute('title');
+        if (titleAttr && titleAttr.length > 5) {
+            // Remove date from title if present (format: "TITLE MM/DD/YYYY")
+            docTitle = titleAttr.replace(/\s+\d{2}\/\d{2}\/\d{4}$/, '').trim();
+        } else {
+            // Fallback: try to find document title in cells
+            for (let i = 0; i < cells.length; i++) {
+                const cellText = cells[i].textContent.trim();
+                // Skip cells with just numbers, images, dates, or javascript
+                if (cellText && 
+                    cellText.length > 5 && 
+                    !cellText.includes('javascript:') && 
+                    !cellText.includes('Image') &&
+                    !cellText.includes('View') &&
+                    !/^\d+$/.test(cellText) &&
+                    !/^\d{2}\/\d{2}\/\d{4}$/.test(cellText) &&
+                    !cellText.includes('Filing') &&
+                    !cellText.includes('Order')) {
+                    
+                    docTitle = cellText;
+                    if (docTitle.length > 10) {
+                        break;
+                    }
+                }
             }
         }
         
+        // Clean up the title
+        if (docTitle && docTitle !== 'document') {
+            docTitle = docTitle
+                .replace(/\s+/g, ' ')  // Replace multiple spaces with single space
+                .replace(/[<>:"/\\|?*]/g, '_')  // Replace invalid filename characters
+                .substring(0, 80)  // Limit length
+                .trim();
+        }
+        
+        // If we still don't have a good title, use a generic one
+        if (!docTitle || docTitle === 'document' || docTitle.length < 3) {
+            docTitle = `Document_${docNumber}`;
+        }
+        
+        console.log(`DEBUG: Extracted document info - Number: "${docNumber}", Title: "${docTitle}"`);
         return { number: docNumber, title: docTitle };
     }
 
@@ -263,10 +301,17 @@
             // Add humanlike pause before processing document
             setTimeout(() => {
                 console.log(`DEBUG: Starting document processing after humanlike delay`);
+                console.log(`DEBUG: Document info being processed:`, {
+                    number: docInfo.number,
+                    title: docInfo.title,
+                    caseNumber: caseNumber,
+                    url: fullUrl.substring(0, 100) + '...'
+                });
                 
                 // Send message to background script to open PDF tab
                 console.log(`DEBUG: Sending message to background with:`, {
                     action: 'openPDFTabWithCallback',
+                    url: fullUrl,
                     documentNumber: docInfo.number,
                     documentTitle: docInfo.title,
                     caseNumber: caseNumber
@@ -308,6 +353,7 @@
     // Function to process next document
     function processNextDocument() {
         if (!isRunning || currentIndex >= documentLinks.length) {
+            console.log(`DEBUG: processNextDocument called but not processing - isRunning: ${isRunning}, currentIndex: ${currentIndex}, documentLinks.length: ${documentLinks.length}`);
             return;
         }
 
@@ -321,6 +367,7 @@
         // Debug: Log document info being processed
         const docInfo = extractDocumentInfo(link);
         console.log(`DEBUG: Document ${docIndex} info:`, docInfo);
+        console.log(`DEBUG: Document ${docIndex} link:`, link.href.substring(0, 100) + '...');
 
         processDocument(link, (success) => {
             activeDownloads--;
@@ -336,132 +383,94 @@
                 if (isRunning && currentIndex < documentLinks.length && activeDownloads < maxConcurrentDownloads) {
                     processNextDocument();
                 } else if (isRunning && currentIndex >= documentLinks.length && activeDownloads === 0) {
-                    // All documents processed - NEXT PAGE FUNCTIONALITY COMMENTED OUT
-                    console.log('All documents on current page processed. Next page functionality disabled.');
-                    stopProcessing();
-                    // checkForNextPage(); // COMMENTED OUT
+                    console.log('All documents on current page processed. Checking for next page...');
+                    checkForNextPage();
                 }
             }, getHumanlikeDelay());
         });
     }
 
-    // Function to check for next page - COMMENTED OUT FOR SINGLE PAGE TESTING
-    /*
+    // Function to navigate to the next results page, if any
     function checkForNextPage() {
         const nextButton = findNextPageButton();
-        
-        // Prevent rapid page changes
+        // Throttle rapid page changes
         const now = Date.now();
         if (now - lastPageChangeTime < 5000) {
             console.log('Preventing rapid page change, waiting...');
             setTimeout(checkForNextPage, 5000 - (now - lastPageChangeTime));
             return;
         }
-        
         if (nextButton && !nextButton.disabled) {
             console.log(`Moving to next page from page ${currentPageNumber}...`);
-            
-            // Store current page info to detect if page actually changes
-            const currentUrl = window.location.href;
-            const currentDocCount = documentLinks.length;
-            
-            // Update page tracking
+            const previousUrl = window.location.href;
+            const previousDocCount = documentLinks.length;
             lastPageChangeTime = now;
             const targetPageNumber = currentPageNumber + 1;
-            
-            // Add random delay before clicking next page
+
+            // Delay before navigation for humanlike behaviour
             setTimeout(() => {
-                // Extract the postback parameters from the JavaScript URL
-                const jsCode = nextButton.href.replace('javascript:', '');
-                const match = jsCode.match(/__doPostBack\('([^']+)','([^']+)'\)/);
-                
+                console.log('Clicking next page button…');
+                const match = nextButton.href ? nextButton.href.match(/__doPostBack\('([^']+)'\,'([^']+)'\)/) : null;
                 if (match) {
                     const [, eventTarget, eventArgument] = match;
-                    console.log(`Triggering postback: ${eventTarget}, ${eventArgument}`);
-                    
-                    // Manually trigger the postback by submitting a form
+                    console.log(`Submitting form for postback: target=${eventTarget}, arg=${eventArgument}`);
+
                     const form = document.forms[0] || document.querySelector('form');
                     if (form) {
-                        // Create hidden inputs for the postback
-                        let eventTargetInput = form.querySelector('input[name="__EVENTTARGET"]');
-                        let eventArgumentInput = form.querySelector('input[name="__EVENTARGUMENT"]');
-                        
-                        if (!eventTargetInput) {
-                            eventTargetInput = document.createElement('input');
-                            eventTargetInput.type = 'hidden';
-                            eventTargetInput.name = '__EVENTTARGET';
-                            form.appendChild(eventTargetInput);
-                        }
-                        
-                        if (!eventArgumentInput) {
-                            eventArgumentInput = document.createElement('input');
-                            eventArgumentInput.type = 'hidden';
-                            eventArgumentInput.name = '__EVENTARGUMENT';
-                            form.appendChild(eventArgumentInput);
-                        }
-                        
-                        // Set the values and submit
-                        eventTargetInput.value = eventTarget;
-                        eventArgumentInput.value = eventArgument;
-                        
-                        console.log('Submitting form for postback...');
-                        form.submit();
-                        
-                        // Wait for page to load and restart processing
-                        setTimeout(() => checkForNewPage(currentUrl, currentDocCount, targetPageNumber), getRandomDelay(3000));
+                        let et = form.querySelector('input[name="__EVENTTARGET"]');
+                        let ea = form.querySelector('input[name="__EVENTARGUMENT"]');
+                        if (!et) { et = document.createElement('input'); et.type = 'hidden'; et.name = '__EVENTTARGET'; form.appendChild(et); }
+                        if (!ea) { ea = document.createElement('input'); ea.type = 'hidden'; ea.name = '__EVENTARGUMENT'; form.appendChild(ea); }
+
+                        et.value = eventTarget;
+                        ea.value = eventArgument;
+
+                        // Prefer async postBack via bridge to keep page context
+                        window.postMessage({type:'HCDC_NEXT_PAGE', target:eventTarget, argument:eventArgument}, '*');
                     } else {
-                        console.log('No form found for postback, processing complete');
-                        stopProcessing();
+                        console.log('Form not found; clicking button instead');
+                        nextButton.click();
                     }
                 } else {
-                    console.log('Could not parse postback parameters, processing complete');
-                    stopProcessing();
+                    console.log('Could not parse postback; clicking button');
+                    nextButton.click();
                 }
+
+                setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber), getRandomDelay(3000));
             }, getRandomDelay());
         } else {
             console.log('No next page found, processing complete');
             stopProcessing();
         }
     }
-    */
 
-        // Function to check if new page has loaded - COMMENTED OUT FOR SINGLE PAGE TESTING
-    /*
+    // Verify that a new page has actually loaded before restarting processing
     function checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount = 0) {
         const currentUrl = window.location.href;
         const newLinks = findDocumentLinks();
-        
-        // Check if page actually changed
+
         if (currentUrl === previousUrl && newLinks.length === previousDocCount) {
             if (retryCount < 5) {
                 console.log(`Page hasn't changed yet, retrying... (${retryCount + 1}/5)`);
                 setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount + 1), getRandomDelay(1000));
                 return;
             } else {
-                console.log('Page failed to change after 5 retries, stopping processing');
+                console.log('Page failed to change after retries, stopping');
                 stopProcessing();
                 return;
             }
         }
-        
+
         if (newLinks.length > 0) {
             console.log(`New page loaded with ${newLinks.length} documents`);
-            console.log(`URL changed from ${previousUrl.substring(Math.max(0, previousUrl.length - 50))} to ${currentUrl.substring(Math.max(0, currentUrl.length - 50))}`);
-            
-            // Update current page number
             currentPageNumber = targetPageNumber;
             console.log(`Now on page ${currentPageNumber}`);
-            
-            // Clear processed documents for new page
-            // This ensures we process documents on each page even in debug mode
             processedDocuments.clear();
-            console.log('Cleared processed documents for new page');
-            
             documentLinks = newLinks;
             currentIndex = 0;
-            
-            // Start processing documents on new page
-            console.log(`DEBUG: Starting to process ${Math.min(maxConcurrentDownloads, documentLinks.length)} documents concurrently`);
+            activeDownloads = 0;
+
+            console.log(`DEBUG: Starting to process ${Math.min(maxConcurrentDownloads, documentLinks.length)} documents on new page`);
             for (let i = 0; i < Math.min(maxConcurrentDownloads, documentLinks.length); i++) {
                 processNextDocument();
             }
@@ -469,12 +478,11 @@
             if (retryCount < 3) {
                 setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount + 1), getRandomDelay(500));
             } else {
-                console.log('No documents found on new page after retries, processing complete');
+                console.log('No documents found on new page, stopping');
                 stopProcessing();
             }
         }
     }
-    */
 
     // Function to find next page button
     function findNextPageButton() {
@@ -545,6 +553,13 @@
         }
         
         console.log(`Found ${documentLinks.length} documents to process`);
+        
+        // Debug: Log all documents that will be processed
+        documentLinks.forEach((link, index) => {
+            const docInfo = extractDocumentInfo(link);
+            console.log(`DEBUG: Document ${index + 1} queued - Number: "${docInfo.number}", Title: "${docInfo.title}"`);
+        });
+        
         currentIndex = 0;
         activeDownloads = 0;
         
@@ -559,13 +574,17 @@
             // Start processing documents after session is cleared
             console.log(`DEBUG: Starting to process ${Math.min(maxConcurrentDownloads, documentLinks.length)} documents concurrently`);
             
-            // Process documents with humanlike delays between each
+            // Process documents with staggered delays between each
             for (let i = 0; i < Math.min(maxConcurrentDownloads, documentLinks.length); i++) {
+                const delay = i * 2000; // 2 second delay between each document start
                 setTimeout(() => {
-                    console.log(`DEBUG: Starting document ${i + 1} after humanlike delay`);
+                    console.log(`DEBUG: Starting document ${i + 1} after ${delay}ms delay`);
                     processNextDocument();
-                }, i * getHumanlikeDelay()); // Humanlike delay between each document start
+                }, delay);
             }
+
+            // Persist state for subsequent navigations
+            sessionStorage.setItem('hcdc_auto_click_state', JSON.stringify({active: true, debugMode, baseClickDelay}));
         });
     }
 
@@ -576,6 +595,9 @@
         currentIndex = 0;
         activeDownloads = 0;
         documentLinks = [];
+
+        // Clear persisted state
+        sessionStorage.removeItem('hcdc_auto_click_state');
     }
 
     // Function to test link detection
@@ -604,6 +626,8 @@
         chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (request.action === 'startAutoClick') {
             debugMode = request.debugMode || false;
+            // Serial processing in debug mode to avoid tab-closing race conditions
+            if (debugMode) maxConcurrentDownloads = 1;
             startProcessing();
             sendResponse({success: true, count: documentLinks.length, debugMode: debugMode});
         } else if (request.action === 'stopAutoClick') {

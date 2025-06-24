@@ -83,10 +83,6 @@ chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
     }
     
     // Clean up stored document info and callbacks
-    if (tabDocumentInfo[tabId]) {
-        console.log('DEBUG: Cleaning up document info for tab:', tabId);
-        delete tabDocumentInfo[tabId];
-    }
     if (tabResponseCallbacks[tabId]) {
         console.log('DEBUG: Cleaning up callback for tab:', tabId);
         delete tabResponseCallbacks[tabId];
@@ -114,7 +110,14 @@ function closeCurrentPDFTab() {
     });
 }
 
-// Function to extract PDF URL from ViewFilePage (injected into tab)
+/**
+ * Extracts the direct PDF URL from the District Clerk ViewFilePage and triggers a download.
+ * Executed as an injected script inside the newly opened viewer tab.
+ * After locating the PDF resource, the function messages the background script with
+ * action 'downloadPDF' and closes the tab.
+ *
+ * @param {number} tabId - Identifier of the tab where extraction occurs.
+ */
 function extractPDFUrl(tabId) {
     const extractStartTime = Date.now();
     console.log(`DEBUG [${new Date().toISOString()}]: Starting PDF extraction from ViewFilePage`);
@@ -413,7 +416,7 @@ async function checkExistingFiles(filename) {
 }
 
 // Listen for download events to ensure proper file naming and location
-chrome.downloads.onDeterminingFilename.addListener(async (downloadItem, suggest) => {
+chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
     console.log(`DEBUG [${new Date().toISOString()}]: onDeterminingFilename called for:`, downloadItem.url);
     
     // Check if this is from the District Clerk site
@@ -452,121 +455,42 @@ chrome.downloads.onDeterminingFilename.addListener(async (downloadItem, suggest)
             // Format: {caseNumber}/{number} {title}.pdf
             filename = `${currentCaseNumber}/${docInfo.number} ${sanitizedTitle}.pdf`;
             console.log('DEBUG: Using document-based filename:', filename);
-            console.log('DEBUG: Components - case:', currentCaseNumber, 'number:', docInfo.number, 'title:', sanitizedTitle);
         } else {
-            // Fallback to timestamp-based naming
-            const timestamp = Date.now();
-            filename = `${currentCaseNumber}/hcdc_document_${timestamp}.pdf`;
-            console.log('DEBUG: Using timestamp-based filename:', filename);
-            console.log('DEBUG: Fallback reason - docInfo:', docInfo);
-            console.log('DEBUG: Fallback validation failed for:', {
-                hasDocInfo: !!docInfo,
-                hasNumber: docInfo?.number,
-                numberNotUnknown: docInfo?.number !== 'unknown',
-                hasTitle: docInfo?.title,
-                titleNotDocument: docInfo?.title !== 'document'
-            });
+            // Fallback
+            if (docInfo && docInfo.number && docInfo.number !== 'unknown') {
+                filename = `${currentCaseNumber}/${docInfo.number} Document.pdf`;
+            } else {
+                filename = `${currentCaseNumber}/hcdc_document_${Date.now()}.pdf`;
+            }
+            console.log('DEBUG: Using fallback filename:', filename);
         }
         
-        // Check for duplicates in current session first
+        // Suggest filename immediately (must be synchronous)
+        try {
+            suggest({ filename: filename, conflictAction: 'uniquify' });
+        } catch (e) {
+            console.error('ERROR suggesting filename:', e);
+        }
+        
+        // ---- Duplicate checks run asynchronously so we don't block suggest ----
         const sessionKey = generateSessionKey(currentCaseNumber, docInfo?.number || 'unknown', docInfo?.title || 'document');
-        console.log(`DEBUG [${new Date().toISOString()}]: Checking session key:`, sessionKey);
-        console.log(`DEBUG [${new Date().toISOString()}]: Current session downloads:`, Array.from(sessionDownloads));
+        console.log(`DEBUG [${new Date().toISOString()}]: Async duplicate check. Key:`, sessionKey);
         
         if (sessionDownloads.has(sessionKey)) {
-            console.log(`DEBUG [${new Date().toISOString()}]: Document already downloaded in this session, cancelling:`, filename);
-            
-            // Cancel the download
-            suggest({
-                filename: filename,
-                conflictAction: 'overwrite' // This will be cancelled anyway
-            });
-            
-            // Cancel the download immediately
-            setTimeout(() => {
-                chrome.downloads.cancel(downloadItem.id, () => {
-                    console.log(`DEBUG [${new Date().toISOString()}]: Download cancelled for duplicate in session:`, filename);
-                    
-                    // Notify content script that download was skipped
-                    if (currentPDFTabId && tabResponseCallbacks[currentPDFTabId]) {
-                        const callback = tabResponseCallbacks[currentPDFTabId];
-                        callback({
-                            success: true, 
-                            tabId: currentPDFTabId, 
-                            downloadSuccess: false, 
-                            skipped: true,
-                            reason: 'Already downloaded in this session',
-                            filename: filename
-                        });
-                        delete tabResponseCallbacks[currentPDFTabId];
-                    }
-                    
-                    // Close the PDF tab
-                    if (currentPDFTabId) {
-                        chrome.tabs.remove(currentPDFTabId);
-                        currentPDFTabId = null;
-                    }
-                });
-            }, 100);
-            
+            console.log('Duplicate in session detected. Cancelling download:', filename);
+            chrome.downloads.cancel(downloadItem.id);
             return;
         }
         
-        // Also check if file already exists on disk
-        console.log(`DEBUG [${new Date().toISOString()}]: Checking if file already exists on disk:`, filename);
-        const existingFiles = await checkExistingFiles(filename);
-        if (existingFiles.length > 0) {
-            console.log(`DEBUG [${new Date().toISOString()}]: File already exists on disk, cancelling download:`, filename);
-            
-            // Add to session downloads to prevent future attempts
-            sessionDownloads.add(sessionKey);
-            
-            // Cancel the download
-            suggest({
-                filename: filename,
-                conflictAction: 'overwrite' // This will be cancelled anyway
-            });
-            
-            // Cancel the download immediately
-            setTimeout(() => {
-                chrome.downloads.cancel(downloadItem.id, () => {
-                    console.log(`DEBUG [${new Date().toISOString()}]: Download cancelled for existing file:`, filename);
-                    
-                    // Notify content script that download was skipped
-                    if (currentPDFTabId && tabResponseCallbacks[currentPDFTabId]) {
-                        const callback = tabResponseCallbacks[currentPDFTabId];
-                        callback({
-                            success: true, 
-                            tabId: currentPDFTabId, 
-                            downloadSuccess: false, 
-                            skipped: true,
-                            reason: 'File already exists',
-                            filename: filename
-                        });
-                        delete tabResponseCallbacks[currentPDFTabId];
-                    }
-                    
-                    // Close the PDF tab
-                    if (currentPDFTabId) {
-                        chrome.tabs.remove(currentPDFTabId);
-                        currentPDFTabId = null;
-                    }
-                });
-            }, 100);
-            
-            return;
-        }
-        
-        // Add to session downloads to track this download
-        sessionDownloads.add(sessionKey);
-        console.log(`DEBUG [${new Date().toISOString()}]: Added to session downloads:`, sessionKey);
-        
-        console.log('Setting download filename:', filename);
-        
-        // Use the suggest callback to set the filename and handle conflicts
-        suggest({
-            filename: filename,
-            conflictAction: 'uniquify'
+        checkExistingFiles(filename).then(existingFiles => {
+            if (existingFiles.length > 0) {
+                console.log('File already exists on disk. Cancelling download:', filename);
+                sessionDownloads.add(sessionKey);
+                chrome.downloads.cancel(downloadItem.id);
+            } else {
+                sessionDownloads.add(sessionKey);
+                console.log('Filename set and no duplicates found. Proceeding with download.');
+            }
         });
     }
 });
@@ -794,8 +718,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 downloadId: request.downloadId
             });
             
-            // Clean up the callback
+            // Clean up the callback and related document info now that download finished
             delete tabResponseCallbacks[request.tabId];
+            if (tabDocumentInfo[request.tabId]) {
+                delete tabDocumentInfo[request.tabId];
+            }
         }
         
         sendResponse({success: true});
