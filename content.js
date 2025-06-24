@@ -227,13 +227,19 @@
             const baseUrl = 'https://www.hcdistrictclerk.com/Edocs/Public/ViewFilePage.aspx';
             const fullUrl = `${baseUrl}?${paramArray[0]}`;
             const docInfo = extractDocumentInfo(link);
+            const caseNumber = getCaseNumber();
+            
+            // Debug logging
+            console.log(`DEBUG: Extracted case number: "${caseNumber}"`);
+            console.log(`DEBUG: Extracted document info:`, docInfo);
             
             // Check for duplicates using session key
-            const caseNumber = getCaseNumber();
             const sessionKey = generateSessionKey(caseNumber, docInfo.number, docInfo.title);
             
             if (processedDocuments.has(sessionKey)) {
                 console.log(`Skipping duplicate document: ${docInfo.number} - ${docInfo.title}`);
+                console.log(`DEBUG: Session key found in processedDocuments:`, sessionKey);
+                console.log(`DEBUG: All processed documents:`, Array.from(processedDocuments));
                 callback(true); // Return true so it's considered "processed successfully"
                 return;
             }
@@ -281,6 +287,10 @@
         activeDownloads++;
 
         console.log(`Processing document ${docIndex}/${documentLinks.length}`);
+        
+        // Debug: Log document info being processed
+        const docInfo = extractDocumentInfo(link);
+        console.log(`DEBUG: Document ${docIndex} info:`, docInfo);
 
         processDocument(link, (success) => {
             activeDownloads--;
@@ -407,20 +417,19 @@
             currentPageNumber = targetPageNumber;
             console.log(`Now on page ${currentPageNumber}`);
             
-            // Clear processed documents for new page only if we're not in debug mode
-            // In debug mode, we want to track across pages to avoid re-downloading
-            if (!debugMode) {
-                processedDocuments.clear();
-                console.log('Cleared processed documents for new page');
-            }
+            // Clear processed documents for new page
+            // This ensures we process documents on each page even in debug mode
+            processedDocuments.clear();
+            console.log('Cleared processed documents for new page');
             
             documentLinks = newLinks;
             currentIndex = 0;
             
-            // Start processing documents on new page
-            for (let i = 0; i < Math.min(maxConcurrentDownloads, documentLinks.length); i++) {
-                processNextDocument();
-            }
+                    // Start processing documents on new page
+        console.log(`DEBUG: Starting to process ${Math.min(maxConcurrentDownloads, documentLinks.length)} documents concurrently`);
+        for (let i = 0; i < Math.min(maxConcurrentDownloads, documentLinks.length); i++) {
+            processNextDocument();
+        }
         } else {
             if (retryCount < 3) {
                 setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount + 1), getRandomDelay(500));
@@ -490,13 +499,8 @@
         
         // Send case number to background and clear session downloads
         const caseNumber = getCaseNumber();
-        chrome.runtime.sendMessage({
-            action: 'setCaseNumber',
-            caseNumber: caseNumber,
-            clearSession: true
-        });
         
-        // Find documents on current page
+        // Find documents on current page first
         documentLinks = findDocumentLinks();
         if (documentLinks.length === 0) {
             console.log('No documents found');
@@ -508,10 +512,20 @@
         currentIndex = 0;
         activeDownloads = 0;
         
-        // Start processing documents
-        for (let i = 0; i < Math.min(maxConcurrentDownloads, documentLinks.length); i++) {
-            processNextDocument();
-        }
+        // Clear session downloads BEFORE processing any documents
+        chrome.runtime.sendMessage({
+            action: 'setCaseNumber',
+            caseNumber: caseNumber,
+            clearSession: true
+        }, (response) => {
+            console.log('DEBUG: Session cleared, starting document processing');
+            
+            // Start processing documents after session is cleared
+            console.log(`DEBUG: Starting to process ${Math.min(maxConcurrentDownloads, documentLinks.length)} documents concurrently`);
+            for (let i = 0; i < Math.min(maxConcurrentDownloads, documentLinks.length); i++) {
+                processNextDocument();
+            }
+        });
     }
 
     // Function to stop processing

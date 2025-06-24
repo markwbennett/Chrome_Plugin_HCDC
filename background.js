@@ -428,6 +428,7 @@ chrome.downloads.onDeterminingFilename.addListener(async (downloadItem, suggest)
         } else {
             console.log('DEBUG: No document info found. currentPDFTabId:', currentPDFTabId);
             console.log('DEBUG: Available tab document info:', Object.keys(tabDocumentInfo));
+            console.log('DEBUG: Full tabDocumentInfo:', tabDocumentInfo);
         }
         
         // Ensure we have a case number
@@ -435,26 +436,39 @@ chrome.downloads.onDeterminingFilename.addListener(async (downloadItem, suggest)
             console.log('DEBUG: Case number not set, using default');
             currentCaseNumber = 'unknown_case';
         }
+        console.log('DEBUG: Final case number for filename:', currentCaseNumber);
         
         // Create filename with document number and title
         let filename;
+        console.log('DEBUG: About to create filename with docInfo:', docInfo);
+        console.log('DEBUG: DocInfo validation - number:', docInfo?.number, 'title:', docInfo?.title);
+        
         if (docInfo && docInfo.number && docInfo.number !== 'unknown' && docInfo.title && docInfo.title !== 'document') {
             // Sanitize the title to remove invalid filename characters
             const sanitizedTitle = docInfo.title.replace(/[<>:"/\\|?*]/g, '_').trim();
             // Format: {caseNumber}/{number} {title}.pdf
             filename = `${currentCaseNumber}/${docInfo.number} ${sanitizedTitle}.pdf`;
             console.log('DEBUG: Using document-based filename:', filename);
+            console.log('DEBUG: Components - case:', currentCaseNumber, 'number:', docInfo.number, 'title:', sanitizedTitle);
         } else {
             // Fallback to timestamp-based naming
             const timestamp = Date.now();
             filename = `${currentCaseNumber}/hcdc_document_${timestamp}.pdf`;
             console.log('DEBUG: Using timestamp-based filename:', filename);
             console.log('DEBUG: Fallback reason - docInfo:', docInfo);
+            console.log('DEBUG: Fallback validation failed for:', {
+                hasDocInfo: !!docInfo,
+                hasNumber: docInfo?.number,
+                numberNotUnknown: docInfo?.number !== 'unknown',
+                hasTitle: docInfo?.title,
+                titleNotDocument: docInfo?.title !== 'document'
+            });
         }
         
         // Check for duplicates in current session first
         const sessionKey = generateSessionKey(currentCaseNumber, docInfo?.number || 'unknown', docInfo?.title || 'document');
         console.log(`DEBUG [${new Date().toISOString()}]: Checking session key:`, sessionKey);
+        console.log(`DEBUG [${new Date().toISOString()}]: Current session downloads:`, Array.from(sessionDownloads));
         
         if (sessionDownloads.has(sessionKey)) {
             console.log(`DEBUG [${new Date().toISOString()}]: Document already downloaded in this session, cancelling:`, filename);
@@ -618,7 +632,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // If case number changed or explicitly requested, clear session downloads
         if (currentCaseNumber !== request.caseNumber || request.clearSession) {
             console.log('Clearing session downloads:', request.clearSession ? 'explicitly requested' : 'case number changed');
+            console.log('Session downloads before clearing:', Array.from(sessionDownloads));
             sessionDownloads.clear();
+            console.log('Session downloads after clearing:', Array.from(sessionDownloads));
+        } else {
+            console.log('NOT clearing session downloads. Current case:', currentCaseNumber, 'Request case:', request.caseNumber, 'Clear requested:', request.clearSession);
         }
         
         currentCaseNumber = request.caseNumber;
@@ -678,6 +696,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         console.log(`DEBUG [${new Date().toISOString()}]: Received openPDFTabWithCallback request`);
         console.log(`DEBUG [${new Date().toISOString()}]: Request URL:`, request.url?.substring(0, 100) + '...');
         console.log(`DEBUG [${new Date().toISOString()}]: Document info:`, request.documentNumber, request.documentTitle);
+        console.log(`DEBUG [${new Date().toISOString()}]: Case number:`, request.caseNumber);
         
         // Validate URL
         if (!request.url || !request.url.startsWith('http')) {
@@ -720,6 +739,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     title: request.documentTitle || 'document'
                 };
                 console.log(`DEBUG [${new Date().toISOString()}]: Stored document info for tab ${tab.id}:`, tabDocumentInfo[tab.id]);
+                console.log(`DEBUG [${new Date().toISOString()}]: All stored tab document info:`, tabDocumentInfo);
                 
                 // Update case number if provided
                 if (request.caseNumber && request.caseNumber !== currentCaseNumber) {
