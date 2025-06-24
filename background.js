@@ -5,6 +5,9 @@ console.log(`HCDC Auto Clicker v${manifest.version} background script loaded at:
 // Store case number for current download session
 let currentCaseNumber = 'unknown_case';
 
+// Track downloaded files in current session to prevent duplicates
+let sessionDownloads = new Set();
+
 // Track the current PDF tab to ensure only one is open at a time
 let currentPDFTabId = null;
 
@@ -13,6 +16,14 @@ let tabResponseCallbacks = {};
 
 // Store document information for each tab
 let tabDocumentInfo = {};
+
+// Track plugin-initiated vs manual PDF tab opens
+let pluginInitiatedTabs = new Set();
+
+// Function to generate session key for duplicate checking
+function generateSessionKey(caseNumber, docNumber, docTitle) {
+    return `${caseNumber}_${docNumber}_${docTitle}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+}
 
 // Listen for tab updates to handle ViewFilePage tabs
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
@@ -23,6 +34,16 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     if (changeInfo.status === 'complete' && tab.url && tab.url.includes('ViewFilePage.aspx')) {
         console.log(`DEBUG [${new Date().toISOString()}]: ViewFilePage loaded for tab: ${tabId}`);
         console.log(`DEBUG [${new Date().toISOString()}]: ViewFilePage URL: ${tab.url?.substring(0, 100) + '...'}`);
+        
+        // Check if this tab was initiated by the plugin
+        const isPluginInitiated = pluginInitiatedTabs.has(tabId);
+        console.log(`DEBUG [${new Date().toISOString()}]: Tab ${tabId} plugin-initiated: ${isPluginInitiated}`);
+        
+        if (!isPluginInitiated) {
+            console.log(`DEBUG [${new Date().toISOString()}]: Skipping auto-download for manually opened PDF viewer tab: ${tabId}`);
+            return;
+        }
+        
         console.log(`DEBUG [${new Date().toISOString()}]: Injecting PDF extraction script into tab: ${tabId}`);
         
         // Store this as the current PDF tab
@@ -69,6 +90,12 @@ chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
     if (tabResponseCallbacks[tabId]) {
         console.log('DEBUG: Cleaning up callback for tab:', tabId);
         delete tabResponseCallbacks[tabId];
+    }
+    
+    // Clean up plugin-initiated tab tracking
+    if (pluginInitiatedTabs.has(tabId)) {
+        console.log('DEBUG: Cleaning up plugin-initiated tab tracking for:', tabId);
+        pluginInitiatedTabs.delete(tabId);
     }
 });
 
@@ -425,14 +452,57 @@ chrome.downloads.onDeterminingFilename.addListener(async (downloadItem, suggest)
             console.log('DEBUG: Fallback reason - docInfo:', docInfo);
         }
         
-        console.log(`DEBUG [${new Date().toISOString()}]: Checking if file already exists:`, filename);
+        // Check for duplicates in current session first
+        const sessionKey = generateSessionKey(currentCaseNumber, docInfo?.number || 'unknown', docInfo?.title || 'document');
+        console.log(`DEBUG [${new Date().toISOString()}]: Checking session key:`, sessionKey);
         
-        // TEMPORARILY DISABLED: Check if file already exists
-        // TODO: Re-enable after testing basic functionality
-        /*
+        if (sessionDownloads.has(sessionKey)) {
+            console.log(`DEBUG [${new Date().toISOString()}]: Document already downloaded in this session, cancelling:`, filename);
+            
+            // Cancel the download
+            suggest({
+                filename: filename,
+                conflictAction: 'overwrite' // This will be cancelled anyway
+            });
+            
+            // Cancel the download immediately
+            setTimeout(() => {
+                chrome.downloads.cancel(downloadItem.id, () => {
+                    console.log(`DEBUG [${new Date().toISOString()}]: Download cancelled for duplicate in session:`, filename);
+                    
+                    // Notify content script that download was skipped
+                    if (currentPDFTabId && tabResponseCallbacks[currentPDFTabId]) {
+                        const callback = tabResponseCallbacks[currentPDFTabId];
+                        callback({
+                            success: true, 
+                            tabId: currentPDFTabId, 
+                            downloadSuccess: false, 
+                            skipped: true,
+                            reason: 'Already downloaded in this session',
+                            filename: filename
+                        });
+                        delete tabResponseCallbacks[currentPDFTabId];
+                    }
+                    
+                    // Close the PDF tab
+                    if (currentPDFTabId) {
+                        chrome.tabs.remove(currentPDFTabId);
+                        currentPDFTabId = null;
+                    }
+                });
+            }, 100);
+            
+            return;
+        }
+        
+        // Also check if file already exists on disk
+        console.log(`DEBUG [${new Date().toISOString()}]: Checking if file already exists on disk:`, filename);
         const existingFiles = await checkExistingFiles(filename);
         if (existingFiles.length > 0) {
-            console.log(`DEBUG [${new Date().toISOString()}]: File already exists, cancelling download:`, filename);
+            console.log(`DEBUG [${new Date().toISOString()}]: File already exists on disk, cancelling download:`, filename);
+            
+            // Add to session downloads to prevent future attempts
+            sessionDownloads.add(sessionKey);
             
             // Cancel the download
             suggest({
@@ -469,7 +539,10 @@ chrome.downloads.onDeterminingFilename.addListener(async (downloadItem, suggest)
             
             return;
         }
-        */
+        
+        // Add to session downloads to track this download
+        sessionDownloads.add(sessionKey);
+        console.log(`DEBUG [${new Date().toISOString()}]: Added to session downloads:`, sessionKey);
         
         console.log('Setting download filename:', filename);
         
@@ -541,6 +614,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true; // Keep message channel open for async response
     } else if (request.action === 'setCaseNumber') {
         console.log('Setting case number:', request.caseNumber);
+        
+        // If case number changed or explicitly requested, clear session downloads
+        if (currentCaseNumber !== request.caseNumber || request.clearSession) {
+            console.log('Clearing session downloads:', request.clearSession ? 'explicitly requested' : 'case number changed');
+            sessionDownloads.clear();
+        }
+        
         currentCaseNumber = request.caseNumber;
         sendResponse({success: true});
         return true;
@@ -580,6 +660,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             }).then(tab => {
                 console.log('DEBUG: Successfully opened new PDF tab:', tab.id);
                 console.log('DEBUG: Tab URL:', tab.url?.substring(0, 100) + '...');
+                
+                // Mark this tab as plugin-initiated
+                pluginInitiatedTabs.add(tab.id);
+                console.log('DEBUG: Marked tab as plugin-initiated:', tab.id);
                 
                 callback({success: true, tabId: tab.id});
             }).catch(error => {
@@ -623,6 +707,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 currentPDFTabId = tab.id;
                 console.log(`DEBUG [${new Date().toISOString()}]: Successfully opened new PDF tab: ${tab.id} (create: ${createDuration}ms, total: ${totalDuration}ms)`);
                 
+                // Mark this tab as plugin-initiated
+                pluginInitiatedTabs.add(tab.id);
+                console.log(`DEBUG [${new Date().toISOString()}]: Marked tab as plugin-initiated: ${tab.id}`);
+                
                 // Store the response callback for this tab
                 tabResponseCallbacks[tab.id] = sendResponse;
                 
@@ -631,6 +719,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     number: request.documentNumber || 'unknown',
                     title: request.documentTitle || 'document'
                 };
+                console.log(`DEBUG [${new Date().toISOString()}]: Stored document info for tab ${tab.id}:`, tabDocumentInfo[tab.id]);
+                
+                // Update case number if provided
+                if (request.caseNumber && request.caseNumber !== currentCaseNumber) {
+                    console.log(`DEBUG [${new Date().toISOString()}]: Updating case number from ${currentCaseNumber} to ${request.caseNumber}`);
+                    currentCaseNumber = request.caseNumber;
+                }
                 
                 // Set timeout in case download never completes
                 setTimeout(() => {

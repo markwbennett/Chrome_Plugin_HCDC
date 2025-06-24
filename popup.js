@@ -15,6 +15,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const delaySlider = document.getElementById('delaySlider');
     const delayDisplay = document.getElementById('delayDisplay');
     const versionDisplay = document.getElementById('versionDisplay');
+    const debugMode = document.getElementById('debugMode');
 
     let statusInterval;
 
@@ -49,19 +50,25 @@ document.addEventListener('DOMContentLoaded', function() {
             // Check if we're on the right page
             if (!tab.url.includes('hcdistrictclerk.com/Edocs/Public/CaseDetails.aspx')) {
                 statusText.textContent = 'Not on Case Details page';
+                statusText.className = 'status error';
                 return;
             }
 
-            chrome.tabs.sendMessage(tab.id, {action: 'startAutoClick'}, function(response) {
+            chrome.tabs.sendMessage(tab.id, {
+                action: 'startAutoClick',
+                debugMode: debugMode.checked
+            }, function(response) {
                 if (chrome.runtime.lastError) {
                     statusText.textContent = 'Error: ' + chrome.runtime.lastError.message;
+                    statusText.className = 'status error';
                     return;
                 }
                 
                 if (response && response.success) {
                     startBtn.disabled = true;
                     stopBtn.disabled = false;
-                    statusText.textContent = 'Running';
+                    statusText.textContent = debugMode.checked ? 'Running (Debug Mode)' : 'Running';
+                    statusText.className = 'status running';
                     linkCountText.textContent = response.count;
                     linkCount.style.display = 'block';
                     progress.style.display = 'block';
@@ -70,6 +77,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     startStatusUpdates();
                 } else {
                     statusText.textContent = 'Failed to start';
+                    statusText.className = 'status error';
                 }
             });
         });
@@ -83,6 +91,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     startBtn.disabled = false;
                     stopBtn.disabled = true;
                     statusText.textContent = 'Stopped';
+                    statusText.className = 'status ready';
                     progress.style.display = 'none';
                     
                     // Stop status updates
@@ -136,6 +145,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         startBtn.disabled = false;
                         stopBtn.disabled = true;
                         statusText.textContent = 'Completed';
+                        statusText.className = 'status ready';
                         stopStatusUpdates();
                     } else {
                         progressText.textContent = response.currentIndex + '/' + response.totalLinks;
@@ -164,6 +174,7 @@ document.addEventListener('DOMContentLoaded', function() {
             
             if (!tab.url.includes('hcdistrictclerk.com/Edocs/Public/CaseDetails.aspx')) {
                 statusText.textContent = 'Not on Case Details page';
+                statusText.className = 'status error';
                 startBtn.disabled = true;
                 return;
             }
@@ -174,6 +185,7 @@ document.addEventListener('DOMContentLoaded', function() {
             chrome.tabs.sendMessage(tab.id, {action: 'getStatus'}, function(response) {
                 if (chrome.runtime.lastError) {
                     statusText.textContent = 'Extension not loaded';
+                    statusText.className = 'status error';
                     startBtn.disabled = true;
                     return;
                 }
@@ -191,23 +203,25 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (response.isRunning) {
                         startBtn.disabled = true;
                         stopBtn.disabled = false;
-                        statusText.textContent = 'Running';
+                        statusText.textContent = response.debugMode ? 'Running (Debug Mode)' : 'Running';
+                        statusText.className = 'status running';
                         progress.style.display = 'block';
                         progressText.textContent = response.currentIndex + '/' + response.totalLinks;
                         startStatusUpdates();
                     } else {
                         statusText.textContent = 'Ready';
+                        statusText.className = 'status ready';
                         startBtn.disabled = false;
                         stopBtn.disabled = true;
                     }
                 } else {
-                    statusText.textContent = 'No response from page';
-                    startBtn.disabled = true;
+                    statusText.textContent = 'No response';
+                    statusText.className = 'status error';
                 }
             });
         });
     }
 
-    // Check status when popup opens
-    setTimeout(checkInitialStatus, 100);
+    // Check initial status when popup opens
+    checkInitialStatus();
 }); 

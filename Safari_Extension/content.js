@@ -2,811 +2,579 @@
 (function() {
     'use strict';
 
-    let isAutoClickingEnabled = false;
-    let clickDelay = 2000; // Default 2 seconds between clicks
+    // Simple state management
+    let isRunning = false;
     let currentIndex = 0;
     let documentLinks = [];
-    let intervalId = null;
-    // No longer need callback tracking since we process concurrently
+    let activeDownloads = 0;
+    let maxConcurrentDownloads = 3;
+    let baseClickDelay = 500; // Base delay in milliseconds
+    let debugMode = false; // Debug mode flag
+    
+    // Track processed documents in this session to prevent duplicates
+    let processedDocuments = new Set();
+    
+    // Track current page to prevent infinite loops
+    let currentPageNumber = 1;
+    let lastPageChangeTime = 0;
 
-    // Persistence key for sessionStorage
-    const PERSISTENCE_KEY = 'hcdc_auto_clicker_state';
-    
-    // Load state from sessionStorage on script initialization
-    function loadPersistedState() {
-        try {
-            const saved = sessionStorage.getItem(PERSISTENCE_KEY);
-            if (saved) {
-                const state = JSON.parse(saved);
-                console.log('DEBUG: Loading persisted state:', state);
-                
-                if (state.isAutoClickingEnabled && state.currentIndex !== undefined) {
-                    isAutoClickingEnabled = state.isAutoClickingEnabled;
-                    currentIndex = state.currentIndex;
-                    console.log(`DEBUG: Resuming auto-clicking from index ${currentIndex}`);
-                    
-                    // Resume processing after a short delay to ensure page is ready
-                    setTimeout(() => {
-                        if (isAutoClickingEnabled) {
-                            documentLinks = findDocumentLinks();
-                            if (documentLinks.length > 0 && currentIndex < documentLinks.length) {
-                                console.log(`DEBUG: Resuming processing with ${documentLinks.length} links from index ${currentIndex}`);
-                                processNextLinkWithWait();
-                            } else {
-                                console.log('DEBUG: No more links to process, checking for next page');
-                                checkForNextPage();
-                            }
-                        }
-                    }, 1000);
-                }
-            }
-        } catch (error) {
-            console.log('DEBUG: Error loading persisted state:', error);
-            clearPersistedState();
-        }
-    }
-    
-    // Save state to sessionStorage
-    function savePersistedState() {
-        try {
-            const state = {
-                isAutoClickingEnabled,
-                currentIndex,
-                timestamp: Date.now()
-            };
-            sessionStorage.setItem(PERSISTENCE_KEY, JSON.stringify(state));
-        } catch (error) {
-            console.log('DEBUG: Error saving persisted state:', error);
-        }
-    }
-    
-    // Clear persisted state
-    function clearPersistedState() {
-        try {
-            sessionStorage.removeItem(PERSISTENCE_KEY);
-        } catch (error) {
-            console.log('DEBUG: Error clearing persisted state:', error);
-        }
+    // Function to generate random delay between min and max (inclusive)
+    function getRandomDelay(baseDelay = baseClickDelay) {
+        // Random delay between 50% to 200% of base delay
+        const minDelay = Math.floor(baseDelay * 0.5);
+        const maxDelay = Math.floor(baseDelay * 2.0);
+        const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+        console.log(`Random delay: ${randomDelay}ms (base: ${baseDelay}ms, range: ${minDelay}-${maxDelay}ms)`);
+        return randomDelay;
     }
 
-    // Function to find all document links
+    // Function to generate session key for duplicate checking
+    function generateSessionKey(caseNumber, docNumber, docTitle) {
+        return `${caseNumber}|${docNumber}|${docTitle}`.toLowerCase();
+    }
+
+    // Function to find document links on the page
     function findDocumentLinks() {
-        console.log(`[${instanceId}] Method 1 - Looking for document links with OpenImageViewerConf...`);
-        const method1Links = Array.from(document.querySelectorAll('a.dcoLink[href*="OpenImageViewerConf"]'));
-        console.log(`[${instanceId}] Method 1 - Found document links with OpenImageViewerConf: ${method1Links.length}`);
-
-        // If method 1 found links, use those
-        if (method1Links.length > 0) {
-            // Extract document info for each link
-            method1Links.forEach(link => {
-                const docInfo = extractDocumentInfo(link);
-                link.documentNumber = docInfo.number;
-                link.documentTitle = docInfo.title;
-            });
-            
-            console.log(`[${instanceId}] Final links found: ${method1Links.length} total`);
-            return method1Links;
+        const links = document.querySelectorAll('a.dcoLink[href*="OpenImageViewerConf"]');
+        console.log(`Found ${links.length} document links on page`);
+        
+        if (debugMode && links.length > 0) {
+            // In debug mode, only return first and last documents
+            const debugLinks = [];
+            if (links.length === 1) {
+                debugLinks.push(links[0]);
+            } else if (links.length >= 2) {
+                debugLinks.push(links[0]); // First document
+                debugLinks.push(links[links.length - 1]); // Last document
+            }
+            console.log(`Debug mode: Processing ${debugLinks.length} documents (first and last only)`);
+            return Array.from(debugLinks);
         }
-
-        // Fallback methods if needed
-        console.log('Method 1 found no links, trying fallback methods...');
         
-        const fallbackLinks = Array.from(document.querySelectorAll('a[href*="javascript:"]'))
-            .filter(link => link.href.includes('OpenImageViewer'));
-        
-        console.log(`Fallback methods found: ${fallbackLinks.length} total`);
-        return fallbackLinks;
+        return Array.from(links);
     }
 
-    // Function to extract document number and title from the link's parent row
-    function extractDocumentInfo(link) {
-        try {
-            // Navigate up to find the table row containing this link
-            let currentElement = link;
-            let tableRow = null;
-            
-            // Go up the DOM tree to find the table row
-            while (currentElement && currentElement.tagName !== 'TR') {
-                currentElement = currentElement.parentElement;
-                if (!currentElement) break;
-            }
-            
-            tableRow = currentElement;
-            
-            if (tableRow) {
-                // Look for cells in this row
-                const cells = tableRow.querySelectorAll('td');
-                
-                // Usually the document number is in the first cell and title in another cell
-                let documentNumber = 'unknown';
-                let documentTitle = 'document';
-                
-                // Try to find document number (usually a numeric value)
-                for (let cell of cells) {
-                    const cellText = cell.textContent.trim();
-                    // Look for a pattern that looks like a document number (digits)
-                    if (/^\d{8,}$/.test(cellText)) {
-                        documentNumber = cellText;
-                        break;
-                    }
-                }
-                
-                // Try to find document title (usually longer text)
-                for (let cell of cells) {
-                    const cellText = cell.textContent.trim();
-                    // Skip cells that are just the document number or very short
-                    if (cellText.length > 10 && cellText !== documentNumber && !cellText.match(/^\d+$/)) {
-                        documentTitle = cellText;
-                        break;
-                    }
-                }
-                
-                console.log('DEBUG: Extracted document info:', {number: documentNumber, title: documentTitle});
-                return {number: documentNumber, title: documentTitle};
-            }
-        } catch (error) {
-            console.log('DEBUG: Error extracting document info:', error);
-        }
-        
-        return {number: 'unknown', title: 'document'};
-    }
-
-    // Legacy clickLink function - now replaced by processLinkWithCallback
-    // Keeping for any external references but functionality moved to processLinkWithCallback
-
-    // Helper function to simulate click with multiple methods
-    function simulateClick(link) {
-        console.log('Attempting click simulation...');
-        
-        // Method 1: Try to manually trigger the href
-        if (link.href && link.href.startsWith('javascript:')) {
-            console.log('Attempting manual URL navigation');
-            try {
-                // Extract the function call and parameters
-                const jsCode = link.href.substring(11);
-                const match = jsCode.match(/(\w+)\('([^']+)',\s*'([^']+)'\)/);
-                
-                if (match) {
-                    const functionName = match[1];
-                    const param1 = match[2];
-                    const param2 = match[3];
-                    
-                    console.log('Extracted function:', functionName, 'with params:', param1.substring(0, 20) + '...');
-                    
-                    // Try to access the function directly from window
-                    if (window[functionName] && typeof window[functionName] === 'function') {
-                        console.log('Found function, attempting direct call');
-                        window[functionName](param1, param2);
-                        console.log('Direct function call successful');
-                        return;
-                    }
-                }
-            } catch (e) {
-                console.log('Manual function call failed:', e);
-            }
-        }
-        
-        // Method 2: Enhanced click event
-        try {
-            // Create a more realistic click event
-            const rect = link.getBoundingClientRect();
-            const centerX = rect.left + rect.width / 2;
-            const centerY = rect.top + rect.height / 2;
-            
-            const event = new MouseEvent('click', {
-                bubbles: true,
-                cancelable: true,
-                view: window,
-                detail: 1,
-                screenX: centerX,
-                screenY: centerY,
-                clientX: centerX,
-                clientY: centerY,
-                button: 0,
-                buttons: 1
-            });
-            
-            const result = link.dispatchEvent(event);
-            console.log('Enhanced click event result:', result);
-            
-        } catch (e) {
-            console.log('Enhanced click failed:', e);
-            
-            // Method 3: Basic click
-            try {
-                link.click();
-                console.log('Basic click executed');
-            } catch (e2) {
-                console.log('All click methods failed:', e2);
-            }
-        }
-    }
-
-    // Function to extract case number from page header
+    // Function to get case number from the page
     function getCaseNumber() {
-        try {
-            // Look for the page header element that contains the case number
-            const headerElement = document.querySelector('#ctl00_ContentPlaceHolder1_labelPageHeader');
-            
-            if (headerElement) {
-                const headerText = headerElement.textContent.trim();
-                console.log('Header text:', headerText);
-                
-                // Extract the case number (first part before the dash)
-                // Format is usually like "183715101010 - The State of Texas vs. ..."
-                const match = headerText.match(/^(\d+)/);
-                if (match) {
-                    // Take first 7 digits for folder name
-                    const fullNumber = match[1];
-                    const caseNumber = fullNumber.substring(0, 7);
-                    console.log('Extracted case number:', caseNumber);
-                    return caseNumber;
-                }
-            }
-        } catch (error) {
-            console.log('Error extracting case number:', error);
+        let fullCaseNumber = null;
+        
+        // Try to find case number in the page title or content
+        const titleElement = document.querySelector('span[id*="CaseNumber"]') || 
+                            document.querySelector('span[id*="caseNumber"]') ||
+                            document.querySelector('.case-number') ||
+                            document.querySelector('#caseNumber');
+        
+        if (titleElement) {
+            fullCaseNumber = titleElement.textContent.trim();
         }
         
-        return 'unknown_case';
+        // Try to extract from page title
+        if (!fullCaseNumber) {
+            const pageTitle = document.title;
+            const caseMatch = pageTitle.match(/Case.*?(\d{4}-\d+|\d+)/i);
+            if (caseMatch) {
+                fullCaseNumber = caseMatch[1];
+            }
+        }
+        
+        // Try to extract from URL
+        if (!fullCaseNumber) {
+            const urlMatch = window.location.href.match(/CaseNumber=([^&]+)/i);
+            if (urlMatch) {
+                fullCaseNumber = decodeURIComponent(urlMatch[1]);
+            }
+        }
+        
+        if (!fullCaseNumber) {
+            return 'unknown_case';
+        }
+        
+        // Extract first 7 digits only for the download folder
+        const digitMatch = fullCaseNumber.match(/\d{7}/);
+        if (digitMatch) {
+            return digitMatch[0];
+        }
+        
+        // Fallback: extract any digits and take first 7
+        const allDigits = fullCaseNumber.replace(/\D/g, '');
+        if (allDigits.length >= 7) {
+            return allDigits.substring(0, 7);
+        }
+        
+        return fullCaseNumber; // Return original if less than 7 digits
     }
 
-    // Make getCaseNumber available globally for popup access
-    window.getCaseNumber = getCaseNumber;
+    // Function to extract document information from table row
+    function extractDocumentInfo(link) {
+        const row = link.closest('tr');
+        if (!row) return { number: 'unknown', title: 'document' };
+        
+        const cells = row.querySelectorAll('td');
+        let docNumber = 'unknown';
+        let docTitle = 'document';
+        
+        // Try to find document number (usually in first few cells)
+        for (let i = 0; i < Math.min(3, cells.length); i++) {
+            const cellText = cells[i].textContent.trim();
+            if (cellText && /^\d+$/.test(cellText)) {
+                docNumber = cellText;
+                break;
+            }
+        }
+        
+        // Try to find document title with better logic
+        for (let i = 0; i < cells.length; i++) {
+            const cellText = cells[i].textContent.trim();
+            // Skip cells with just numbers, images, or javascript
+            if (cellText && 
+                cellText.length > 5 && 
+                !cellText.includes('javascript:') && 
+                !cellText.includes('Image') &&
+                !cellText.includes('View') &&
+                !/^\d+$/.test(cellText) &&
+                !cellText.includes('MM/DD/YYYY')) {
+                
+                // Clean up the title
+                docTitle = cellText
+                    .replace(/\s+/g, ' ')  // Replace multiple spaces with single space
+                    .replace(/[<>:"/\\|?*]/g, '_')  // Replace invalid filename characters
+                    .substring(0, 80)  // Limit length
+                    .trim();
+                
+                if (docTitle.length > 10) {
+                    break;
+                }
+            }
+        }
+        
+        // If we still don't have a good title, try to get it from the link text or nearby elements
+        if (docTitle === 'document' || docTitle.length < 10) {
+            const linkText = link.textContent.trim();
+            if (linkText && linkText.length > 5 && !linkText.includes('Image')) {
+                docTitle = linkText.substring(0, 50);
+            } else {
+                // Use a generic title with document number
+                docTitle = `Document_${docNumber}`;
+            }
+        }
+        
+        return { number: docNumber, title: docTitle };
+    }
 
-    // Function to start auto-clicking
-    function startAutoClicking() {
-        documentLinks = findDocumentLinks();
-        if (documentLinks.length === 0) {
-            console.log('No document links found on this page');
+    // Function to parse JavaScript parameters from href
+    function parseJavaScriptParams(paramsString) {
+        const params = [];
+        let current = '';
+        let inQuotes = false;
+        let quoteChar = '';
+        let depth = 0;
+        
+        for (let i = 0; i < paramsString.length; i++) {
+            const char = paramsString[i];
+            
+            if (!inQuotes && (char === '"' || char === "'")) {
+                inQuotes = true;
+                quoteChar = char;
+                current += char;
+            } else if (inQuotes && char === quoteChar) {
+                inQuotes = false;
+                current += char;
+            } else if (!inQuotes && char === '(') {
+                depth++;
+                current += char;
+            } else if (!inQuotes && char === ')') {
+                depth--;
+                current += char;
+            } else if (!inQuotes && char === ',' && depth === 0) {
+                params.push(current.trim().replace(/^['"]|['"]$/g, ''));
+                current = '';
+            } else {
+                current += char;
+            }
+        }
+        
+        if (current.trim()) {
+            params.push(current.trim().replace(/^['"]|['"]$/g, ''));
+        }
+        
+        return params;
+    }
+
+    // Function to process a single document
+    function processDocument(link, callback) {
+        if (!link.href || !link.href.startsWith('javascript:')) {
+            callback(false);
             return;
         }
 
-        console.log(`[${instanceId}] Found ${documentLinks.length} document links`);
-        console.log(`[${instanceId}] Processing all document links sequentially with download completion...`);
-        console.log(`[${instanceId}] DEBUG: Starting sequential processing at:`, new Date().toISOString());
+        const jsCode = link.href.substring(11);
+        const match = jsCode.match(/(\w+)\((.*)\)/s);
         
-        // Get and send case number to background script
-        const caseNumber = getCaseNumber();
-        console.log('DEBUG: Sending case number to background script:', caseNumber);
-        chrome.runtime.sendMessage({
-            action: 'setCaseNumber',
-            caseNumber: caseNumber
-        }, (response) => {
-            console.log('DEBUG: Case number set response:', response);
-        });
-        
-        currentIndex = 0;
-        isAutoClickingEnabled = true;
-        savePersistedState();
+        if (!match) {
+            callback(false);
+            return;
+        }
 
-        // Process links sequentially with download completion waiting
-        console.log(`DEBUG: Starting sequential processing with download completion waiting`);
-        processNextLinkWithWait();
+        try {
+            const params = match[2];
+            const paramArray = parseJavaScriptParams(params);
+            
+            if (paramArray.length < 1) {
+                callback(false);
+                return;
+            }
+
+            const baseUrl = 'https://www.hcdistrictclerk.com/Edocs/Public/ViewFilePage.aspx';
+            const fullUrl = `${baseUrl}?${paramArray[0]}`;
+            const docInfo = extractDocumentInfo(link);
+            
+            // Check for duplicates using session key
+            const caseNumber = getCaseNumber();
+            const sessionKey = generateSessionKey(caseNumber, docInfo.number, docInfo.title);
+            
+            if (processedDocuments.has(sessionKey)) {
+                console.log(`Skipping duplicate document: ${docInfo.number} - ${docInfo.title}`);
+                callback(true); // Return true so it's considered "processed successfully"
+                return;
+            }
+            
+            // Add to processed documents
+            processedDocuments.add(sessionKey);
+
+            console.log(`Processing document ${docInfo.number}: ${docInfo.title}`);
+            console.log(`Opening URL: ${fullUrl.substring(0, 100)}...`);
+
+            // Send message to background script to open PDF tab
+            chrome.runtime.sendMessage({
+                action: 'openPDFTabWithCallback',
+                url: fullUrl,
+                documentNumber: docInfo.number,
+                documentTitle: docInfo.title,
+                caseNumber: caseNumber
+            }, (response) => {
+                if (response && response.success) {
+                    console.log(`Successfully processed document ${docInfo.number}: ${response.downloadSuccess ? 'Downloaded' : 'Skipped'}`);
+                    if (response.skipped) {
+                        console.log(`Document skipped: ${response.reason}`);
+                    }
+                    callback(response.downloadSuccess || response.skipped);
+                } else {
+                    console.log(`Failed to process document ${docInfo.number}: ${response?.error || 'Unknown error'}`);
+                    callback(false);
+                }
+            });
+        } catch (error) {
+            console.error('Error processing document:', error);
+            callback(false);
+        }
     }
 
-    // Function to process next link and wait for download completion
-    function processNextLinkWithWait() {
-        if (!isAutoClickingEnabled || currentIndex >= documentLinks.length) {
-            console.log(`DEBUG [${new Date().toISOString()}]: Finished processing all document links on current page`);
-            
-            // Check if there's a next page to process
-            checkForNextPage();
+    // Function to process next document
+    function processNextDocument() {
+        if (!isRunning || currentIndex >= documentLinks.length) {
             return;
         }
 
         const link = documentLinks[currentIndex];
-        console.log(`DEBUG [${new Date().toISOString()}]: Processing link ${currentIndex + 1}/${documentLinks.length}:`, link.href.substring(0, 100) + '...');
-        
-        const startTime = Date.now();
-        
-        // Save state before processing
-        savePersistedState();
-        
-        // Process the link and wait for completion
-        processLinkWithCallback(link, (success) => {
-            const endTime = Date.now();
-            const duration = endTime - startTime;
-            console.log(`DEBUG [${new Date().toISOString()}]: Link ${currentIndex + 1} processing completed: ${success} (took ${duration}ms)`);
-            currentIndex++;
-            savePersistedState();
+        const docIndex = currentIndex + 1; // Capture the 1-based index for display
+        currentIndex++;
+        activeDownloads++;
+
+        console.log(`Processing document ${docIndex}/${documentLinks.length}`);
+
+        processDocument(link, (success) => {
+            activeDownloads--;
             
-            // Wait 2 seconds before processing next link (rate limiting)
-            console.log(`DEBUG [${new Date().toISOString()}]: Waiting 2000ms before next link...`);
+            if (success) {
+                console.log(`Document ${docIndex} processed successfully`);
+            } else {
+                console.log(`Document ${docIndex} failed to process`);
+            }
+
+            // Add random delay before processing next document
             setTimeout(() => {
-                processNextLinkWithWait();
-            }, 2000);
+                if (isRunning && currentIndex < documentLinks.length && activeDownloads < maxConcurrentDownloads) {
+                    processNextDocument();
+                } else if (isRunning && currentIndex >= documentLinks.length && activeDownloads === 0) {
+                    // All documents processed, check for next page
+                    checkForNextPage();
+                }
+            }, getRandomDelay());
         });
     }
 
-    // Function to process a single link with callback
-    function processLinkWithCallback(link, callback) {
-        console.log(`DEBUG [${new Date().toISOString()}]: processLinkWithCallback called for:`, link.href.substring(0, 50) + '...');
-        
-        if (link.href && link.href.startsWith('javascript:')) {
-            console.log(`DEBUG [${new Date().toISOString()}]: Processing JavaScript link`);
-            const jsCode = link.href.substring(11);
-            const match = jsCode.match(/(\w+)\((.*)\)/s);
-            
-            if (match) {
-                const functionName = match[1];
-                const params = match[2];
-                console.log(`DEBUG [${new Date().toISOString()}]: Parsed function:`, functionName);
-                
-                try {
-                    // Parse parameters for direct URL construction
-                    const paramArray = parseJavaScriptParams(params);
-                    console.log(`DEBUG [${new Date().toISOString()}]: Parsed parameters:`, paramArray.length, 'params');
-                    
-                    if (paramArray.length >= 1) {
-                        const baseUrl = 'https://www.hcdistrictclerk.com/Edocs/Public/ViewFilePage.aspx';
-                        const fullUrl = `${baseUrl}?${paramArray[0]}`;
-                        
-                        console.log(`DEBUG [${new Date().toISOString()}]: Constructed URL:`, fullUrl.substring(0, 100) + '...');
-                        console.log(`DEBUG [${new Date().toISOString()}]: Sending openPDFTab message with callback`);
-                        
-                        const messageStartTime = Date.now();
-                        
-                        // Use background script to manage tab opening and wait for completion
-                        console.log(`DEBUG [${new Date().toISOString()}]: Sending document info:`, {
-                            documentNumber: link.documentNumber || 'unknown',
-                            documentTitle: link.documentTitle || 'document'
-                        });
-                        
-                        chrome.runtime.sendMessage({
-                            action: 'openPDFTabWithCallback',
-                            url: fullUrl,
-                            documentNumber: link.documentNumber || 'unknown',
-                            documentTitle: link.documentTitle || 'document'
-                        }, (response) => {
-                            const messageEndTime = Date.now();
-                            const messageDuration = messageEndTime - messageStartTime;
-                            
-                            if (chrome.runtime.lastError) {
-                                console.log(`DEBUG [${new Date().toISOString()}]: Runtime error in openPDFTab response (after ${messageDuration}ms):`, chrome.runtime.lastError.message);
-                                callback(false);
-                            } else if (response && response.success) {
-                                if (response.skipped) {
-                                    console.log(`DEBUG [${new Date().toISOString()}]: PDF download skipped (after ${messageDuration}ms) - ${response.reason}: ${response.filename}`);
-                                    callback(true); // Consider skipped downloads as successful
-                                } else {
-                                    console.log(`DEBUG [${new Date().toISOString()}]: PDF tab processing completed (after ${messageDuration}ms):`, response.downloadSuccess);
-                                    callback(response.downloadSuccess);
-                                }
-                            } else {
-                                console.log(`DEBUG [${new Date().toISOString()}]: Failed to open PDF tab (after ${messageDuration}ms):`, response?.error);
-                                callback(false);
-                            }
-                        });
-                    } else {
-                        console.log(`DEBUG [${new Date().toISOString()}]: Could not extract parameters from link`);
-                        callback(false);
-                    }
-                } catch (error) {
-                    console.log(`DEBUG [${new Date().toISOString()}]: Error processing link:`, error);
-                    callback(false);
-                }
-            } else {
-                console.log(`DEBUG [${new Date().toISOString()}]: Could not parse JavaScript function`);
-                callback(false);
-            }
-        } else {
-            console.log(`DEBUG [${new Date().toISOString()}]: Non-JavaScript link, using regular click`);
-            link.click();
-            callback(true);
-        }
-        
-        console.log(`DEBUG [${new Date().toISOString()}]: processLinkWithCallback completed for:`, link.href.substring(0, 50) + '...');
-    }
-
-    // Function to check for next page and continue processing
+    // Function to check for next page
     function checkForNextPage() {
-        if (!isAutoClickingEnabled) {
-            console.log(`DEBUG [${new Date().toISOString()}]: Auto-clicking disabled, stopping pagination`);
-            stopAutoClicking();
+        const nextButton = findNextPageButton();
+        
+        // Prevent rapid page changes
+        const now = Date.now();
+        if (now - lastPageChangeTime < 5000) {
+            console.log('Preventing rapid page change, waiting...');
+            setTimeout(checkForNextPage, 5000 - (now - lastPageChangeTime));
             return;
         }
-
-        const nextButton = findNextPageButton();
-        if (nextButton) {
-            console.log(`DEBUG [${new Date().toISOString()}]: Found next page button, clicking to go to next page`);
+        
+        if (nextButton && !nextButton.disabled) {
+            console.log(`Moving to next page from page ${currentPageNumber}...`);
             
-            // Set up a listener for page load completion
-            setupPageLoadListener(() => {
-                console.log(`DEBUG [${new Date().toISOString()}]: Next page loaded, starting document processing`);
+            // Store current page info to detect if page actually changes
+            const currentUrl = window.location.href;
+            const currentDocCount = documentLinks.length;
+            
+            // Update page tracking
+            lastPageChangeTime = now;
+            const targetPageNumber = currentPageNumber + 1;
+            
+            // Add random delay before clicking next page
+            setTimeout(() => {
+                // Extract the postback parameters from the JavaScript URL
+                const jsCode = nextButton.href.replace('javascript:', '');
+                const match = jsCode.match(/__doPostBack\('([^']+)','([^']+)'\)/);
                 
-                // Reset for new page
-                documentLinks = findDocumentLinks();
-                currentIndex = 0;
-                
-                if (documentLinks.length > 0) {
-                    console.log(`DEBUG [${new Date().toISOString()}]: Found ${documentLinks.length} documents on new page`);
-                    processNextLinkWithWait();
+                if (match) {
+                    const [, eventTarget, eventArgument] = match;
+                    console.log(`Triggering postback: ${eventTarget}, ${eventArgument}`);
+                    
+                    // Manually trigger the postback by submitting a form
+                    const form = document.forms[0] || document.querySelector('form');
+                    if (form) {
+                        // Create hidden inputs for the postback
+                        let eventTargetInput = form.querySelector('input[name="__EVENTTARGET"]');
+                        let eventArgumentInput = form.querySelector('input[name="__EVENTARGUMENT"]');
+                        
+                        if (!eventTargetInput) {
+                            eventTargetInput = document.createElement('input');
+                            eventTargetInput.type = 'hidden';
+                            eventTargetInput.name = '__EVENTTARGET';
+                            form.appendChild(eventTargetInput);
+                        }
+                        
+                        if (!eventArgumentInput) {
+                            eventArgumentInput = document.createElement('input');
+                            eventArgumentInput.type = 'hidden';
+                            eventArgumentInput.name = '__EVENTARGUMENT';
+                            form.appendChild(eventArgumentInput);
+                        }
+                        
+                        // Set the values and submit
+                        eventTargetInput.value = eventTarget;
+                        eventArgumentInput.value = eventArgument;
+                        
+                        console.log('Submitting form for postback...');
+                        form.submit();
+                        
+                        // Wait for page to load and restart processing
+                        setTimeout(() => checkForNewPage(currentUrl, currentDocCount, targetPageNumber), getRandomDelay(3000));
+                    } else {
+                        console.log('No form found for postback, processing complete');
+                        stopProcessing();
+                    }
                 } else {
-                    console.log(`DEBUG [${new Date().toISOString()}]: No documents found on new page, stopping`);
-                    stopAutoClicking();
+                    console.log('Could not parse postback parameters, processing complete');
+                    stopProcessing();
                 }
-            });
-            
-            // Click the next button
-            clickNextPageButton(nextButton);
+            }, getRandomDelay());
         } else {
-            console.log(`DEBUG [${new Date().toISOString()}]: No next page button found, all pages processed`);
-            stopAutoClicking();
+            console.log('No next page found, processing complete');
+            stopProcessing();
         }
     }
 
-    // Function to find the next page button
-    function findNextPageButton() {
-        // Look for the specific next button pattern
-        const nextButtons = document.querySelectorAll('a.PagerHyperlinkStyle[title*="Next"]');
-        console.log(`DEBUG [${new Date().toISOString()}]: Found ${nextButtons.length} potential next page buttons`);
+    // Function to check if new page has loaded
+    function checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount = 0) {
+        const currentUrl = window.location.href;
+        const newLinks = findDocumentLinks();
         
-        for (let button of nextButtons) {
-            console.log(`DEBUG [${new Date().toISOString()}]: Next button candidate:`, {
-                href: button.href?.substring(0, 50) + '...',
-                title: button.title,
-                text: button.textContent.trim()
-            });
+        // Check if page actually changed
+        if (currentUrl === previousUrl && newLinks.length === previousDocCount) {
+            if (retryCount < 5) {
+                console.log(`Page hasn't changed yet, retrying... (${retryCount + 1}/5)`);
+                setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount + 1), getRandomDelay(1000));
+                return;
+            } else {
+                console.log('Page failed to change after 5 retries, stopping processing');
+                stopProcessing();
+                return;
+            }
+        }
+        
+        if (newLinks.length > 0) {
+            console.log(`New page loaded with ${newLinks.length} documents`);
+            console.log(`URL changed from ${previousUrl.substring(Math.max(0, previousUrl.length - 50))} to ${currentUrl.substring(Math.max(0, currentUrl.length - 50))}`);
             
-            // Check if it's a valid next button (contains "Next" and has doPostBack)
-            if (button.title && button.title.toLowerCase().includes('next') && 
-                button.href && button.href.includes('__doPostBack')) {
+            // Update current page number
+            currentPageNumber = targetPageNumber;
+            console.log(`Now on page ${currentPageNumber}`);
+            
+            // Clear processed documents for new page only if we're not in debug mode
+            // In debug mode, we want to track across pages to avoid re-downloading
+            if (!debugMode) {
+                processedDocuments.clear();
+                console.log('Cleared processed documents for new page');
+            }
+            
+            documentLinks = newLinks;
+            currentIndex = 0;
+            
+            // Start processing documents on new page
+            for (let i = 0; i < Math.min(maxConcurrentDownloads, documentLinks.length); i++) {
+                processNextDocument();
+            }
+        } else {
+            if (retryCount < 3) {
+                setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount + 1), getRandomDelay(500));
+            } else {
+                console.log('No documents found on new page after retries, processing complete');
+                stopProcessing();
+            }
+        }
+    }
+
+    // Function to find next page button
+    function findNextPageButton() {
+        // Look for the specific next page button pattern
+        const nextButton = document.querySelector('a.PagerHyperlinkStyle[href*="__doPostBack"][title*="Next"]');
+        if (nextButton && !nextButton.disabled) {
+            console.log(`Found next page button: ${nextButton.title}`);
+            return nextButton;
+        }
+        
+        // Fallback to other common pagination button patterns
+        const selectors = [
+            'a[href*="Page$"][href*="Next"]',
+            'input[type="submit"][name*="Next"]',
+            'a[title*="Next"]',
+            'a[title*="next"]',
+            'input[value*="Next"]',
+            'input[value*="next"]',
+            'a[href*="__doPostBack"][href*="Next"]',
+            'input[name*="ctl00"][value*="Next"]',
+            'input[name*="GridView"][value*="Next"]'
+        ];
+        
+        for (const selector of selectors) {
+            const button = document.querySelector(selector);
+            if (button && !button.disabled) {
+                console.log(`Found next page button with selector: ${selector}`);
                 return button;
             }
         }
         
-        // Alternative: look for any pagination link with "»" or "Next"
-        const altNextButtons = document.querySelectorAll('a[href*="__doPostBack"]');
-        for (let button of altNextButtons) {
-            const href = button.href;
-            const text = button.textContent.trim();
-            
-            // Check for various pager patterns and next indicators
-            if ((href.includes('pager') || href.includes('Pager')) && 
-                (text.includes('»') || text.toLowerCase().includes('next') || button.title?.toLowerCase().includes('next'))) {
-                console.log(`DEBUG [${new Date().toISOString()}]: Found alternative next button:`, {
-                    text: text,
-                    href: href.substring(0, 50) + '...',
-                    title: button.title
-                });
-                return button;
+        // Also try to find pagination links with ">" symbol
+        const paginationLinks = document.querySelectorAll('a[href*="__doPostBack"]');
+        for (const link of paginationLinks) {
+            if (link.textContent.includes('»') || link.textContent.includes('>') || link.textContent.includes('Next')) {
+                console.log(`Found pagination link: ${link.textContent.trim()}`);
+                return link;
             }
         }
         
         return null;
     }
 
-    // Function to click the next page button
-    function clickNextPageButton(button) {
-        console.log(`DEBUG [${new Date().toISOString()}]: Clicking next page button:`, button.href);
+    // Function to start processing
+    function startProcessing() {
+        if (isRunning) return;
         
-        try {
-            // Try to extract and execute the __doPostBack function
-            if (button.href && button.href.includes('__doPostBack')) {
-                const match = button.href.match(/__doPostBack\('([^']+)',\s*'([^']*)'\)/);
-                if (match) {
-                    const target = match[1];
-                    const argument = match[2];
-                    console.log(`DEBUG [${new Date().toISOString()}]: Executing __doPostBack('${target}', '${argument}')`);
-                    
-                    if (typeof __doPostBack === 'function') {
-                        __doPostBack(target, argument);
-                        return;
-                    }
-                }
-            }
-            
-            // Fallback to regular click
-            console.log(`DEBUG [${new Date().toISOString()}]: Fallback to regular click`);
-            button.click();
-            
-        } catch (error) {
-            console.log(`DEBUG [${new Date().toISOString()}]: Error clicking next page button:`, error);
-            // Stop processing if we can't navigate
-            stopAutoClicking();
-        }
-    }
-
-    // Function to set up page load listener
-    function setupPageLoadListener(callback) {
-        console.log(`DEBUG [${new Date().toISOString()}]: Setting up page load listener`);
+        console.log('Starting document processing...');
+        console.log(`Debug mode: ${debugMode ? 'ENABLED' : 'DISABLED'}`);
+        isRunning = true;
         
-        let loadCompleted = false;
-        const startTime = Date.now();
+        // Reset page tracking
+        currentPageNumber = 1;
+        lastPageChangeTime = 0;
         
-        // Method 1: Listen for DOMContentLoaded
-        const domLoadHandler = () => {
-            if (!loadCompleted) {
-                loadCompleted = true;
-                const loadTime = Date.now() - startTime;
-                console.log(`DEBUG [${new Date().toISOString()}]: Page load detected via DOMContentLoaded (${loadTime}ms)`);
-                document.removeEventListener('DOMContentLoaded', domLoadHandler);
-                
-                // Wait a bit more for any dynamic content
-                setTimeout(callback, 1000);
-            }
-        };
+        // Clear processed documents for new session
+        processedDocuments.clear();
         
-        // Method 2: Polling for content changes
-        let lastDocumentCount = documentLinks.length;
-        const pollForChanges = () => {
-            if (loadCompleted) return;
-            
-            const currentLinks = findDocumentLinks();
-            const currentTime = Date.now();
-            
-            // Check if document structure has changed or enough time has passed
-            if (currentLinks.length !== lastDocumentCount || (currentTime - startTime) > 5000) {
-                if (!loadCompleted) {
-                    loadCompleted = true;
-                    const loadTime = currentTime - startTime;
-                    console.log(`DEBUG [${new Date().toISOString()}]: Page load detected via polling (${loadTime}ms, ${currentLinks.length} links)`);
-                    callback();
-                }
-            } else {
-                // Continue polling
-                setTimeout(pollForChanges, 500);
-            }
-        };
+        // Send case number to background and clear session downloads
+        const caseNumber = getCaseNumber();
+        chrome.runtime.sendMessage({
+            action: 'setCaseNumber',
+            caseNumber: caseNumber,
+            clearSession: true
+        });
         
-        // Start both methods
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', domLoadHandler);
-        } else {
-            // Page already loaded, start polling immediately
-            setTimeout(pollForChanges, 100);
+        // Find documents on current page
+        documentLinks = findDocumentLinks();
+        if (documentLinks.length === 0) {
+            console.log('No documents found');
+            stopProcessing();
+            return;
         }
         
-        // Start polling as backup
-        setTimeout(pollForChanges, 100);
-        
-        // Timeout after 10 seconds
-        setTimeout(() => {
-            if (!loadCompleted) {
-                loadCompleted = true;
-                console.log(`DEBUG [${new Date().toISOString()}]: Page load timeout after 10 seconds, proceeding anyway`);
-                callback();
-            }
-        }, 10000);
-    }
-
-    // Function to process a single link (simplified - no callback needed)
-    function processLink(link) {
-        console.log('DEBUG: processLink called for:', link.href.substring(0, 50) + '...');
-        
-        if (link.href && link.href.startsWith('javascript:')) {
-            console.log('DEBUG: Processing JavaScript link');
-            const jsCode = link.href.substring(11);
-            const match = jsCode.match(/(\w+)\((.*)\)/s);
-            
-            if (match) {
-                const functionName = match[1];
-                const params = match[2];
-                console.log('DEBUG: Parsed function:', functionName);
-                
-                try {
-                    // Parse parameters for direct URL construction
-                    const paramArray = parseJavaScriptParams(params);
-                    console.log('DEBUG: Parsed parameters:', paramArray.length, 'params');
-                    
-                    if (paramArray.length >= 1) {
-                        const baseUrl = 'https://www.hcdistrictclerk.com/Edocs/Public/ViewFilePage.aspx';
-                        const fullUrl = `${baseUrl}?${paramArray[0]}`;
-                        
-                        console.log('DEBUG: Constructed URL:', fullUrl.substring(0, 100) + '...');
-                        console.log('DEBUG: Sending openPDFTab message to background script');
-                        
-                        // Use background script to manage tab opening (one tab at a time)
-                        chrome.runtime.sendMessage({
-                            action: 'openPDFTab',
-                            url: fullUrl
-                        }, (response) => {
-                            if (chrome.runtime.lastError) {
-                                console.log('DEBUG: Runtime error in openPDFTab response:', chrome.runtime.lastError.message);
-                            } else if (response && response.success) {
-                                console.log('DEBUG: PDF tab opened successfully:', response.tabId);
-                            } else {
-                                console.log('DEBUG: Failed to open PDF tab:', response?.error);
-                            }
-                        });
-                    } else {
-                        console.log('DEBUG: Could not extract parameters from link');
-                    }
-                } catch (error) {
-                    console.log('DEBUG: Error processing link:', error);
-                }
-            } else {
-                console.log('DEBUG: Could not parse JavaScript function');
-            }
-        } else {
-            console.log('DEBUG: Non-JavaScript link, using regular click');
-            link.click();
-        }
-        
-        console.log('DEBUG: processLink completed for:', link.href.substring(0, 50) + '...');
-    }
-
-    // Helper function to parse JavaScript parameters
-    function parseJavaScriptParams(params) {
-        const paramArray = [];
-        let current = '';
-        let inQuotes = false;
-        let quoteChar = '';
-        
-        for (let i = 0; i < params.length; i++) {
-            const char = params[i];
-            if ((char === '"' || char === "'") && !inQuotes) {
-                inQuotes = true;
-                quoteChar = char;
-            } else if (char === quoteChar && inQuotes) {
-                inQuotes = false;
-                quoteChar = '';
-            } else if (char === ',' && !inQuotes) {
-                paramArray.push(current.trim().replace(/^['"]|['"]$/g, ''));
-                current = '';
-                continue;
-            }
-            current += char;
-        }
-        if (current.trim()) {
-            paramArray.push(current.trim().replace(/^['"]|['"]$/g, ''));
-        }
-        
-        return paramArray;
-    }
-
-    // Function to stop auto-clicking
-    function stopAutoClicking() {
-        isAutoClickingEnabled = false;
-        if (intervalId) {
-            clearInterval(intervalId);
-            intervalId = null;
-        }
+        console.log(`Found ${documentLinks.length} documents to process`);
         currentIndex = 0;
-        clearPersistedState();
-        console.log('Auto-clicking stopped');
+        activeDownloads = 0;
+        
+        // Start processing documents
+        for (let i = 0; i < Math.min(maxConcurrentDownloads, documentLinks.length); i++) {
+            processNextDocument();
+        }
     }
 
-    // Manual test function for debugging
-    function testDocumentLinks() {
-        console.log('=== MANUAL TEST ===');
-        const allLinks = document.querySelectorAll('a');
-        console.log('Total links on page:', allLinks.length);
+    // Function to stop processing
+    function stopProcessing() {
+        console.log('Stopping document processing...');
+        isRunning = false;
+        currentIndex = 0;
+        activeDownloads = 0;
+        documentLinks = [];
+    }
+
+    // Function to test link detection
+    function testLinks() {
+        const links = findDocumentLinks();
+        console.log(`=== LINK DETECTION TEST ===`);
+        console.log(`Found ${links.length} document links`);
         
-        const dcoLinks = document.querySelectorAll('a.dcoLink');
-        console.log('dcoLink elements:', dcoLinks.length);
+        links.forEach((link, index) => {
+            const docInfo = extractDocumentInfo(link);
+            console.log(`${index + 1}. Document ${docInfo.number}: ${docInfo.title}`);
+            console.log(`   Link: ${link.href.substring(0, 100)}...`);
+        });
         
-        const jsLinks = document.querySelectorAll('a[href*="javascript:"]');
-        console.log('JavaScript links:', jsLinks.length);
-        
-        const imageViewerLinks = document.querySelectorAll('a[href*="OpenImageViewer"]');
-        console.log('OpenImageViewer links:', imageViewerLinks.length);
-        
-        // Test pagination
         const nextButton = findNextPageButton();
-        console.log('Next page button found:', !!nextButton);
+        console.log(`Next page button: ${nextButton ? 'Found' : 'Not found'}`);
         if (nextButton) {
-            console.log('Next button details:', {
-                href: nextButton.href,
-                title: nextButton.title,
-                text: nextButton.textContent.trim()
-            });
+            console.log(`Next button: ${nextButton.outerHTML.substring(0, 100)}...`);
         }
         
-        // Only log summary for debugging
-        if (dcoLinks.length > 0) {
-            console.log(`Sample dcoLink:`, dcoLinks[0].href.substring(0, 50) + '...');
-        }
+        return { linksFound: links.length, hasNextPage: !!nextButton };
     }
 
-    // Expose test function globally for manual testing
-    window.testDocumentLinks = testDocumentLinks;
-
-    // Listen for messages from popup and background script
-    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    // Message listener
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+        chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (request.action === 'startAutoClick') {
-            startAutoClicking();
-            sendResponse({success: true, count: documentLinks.length});
+            debugMode = request.debugMode || false;
+            startProcessing();
+            sendResponse({success: true, count: documentLinks.length, debugMode: debugMode});
         } else if (request.action === 'stopAutoClick') {
-            stopAutoClicking();
+            stopProcessing();
             sendResponse({success: true});
         } else if (request.action === 'getStatus') {
-            const links = findDocumentLinks();
-            const nextButton = findNextPageButton();
+            const links = isRunning ? documentLinks : findDocumentLinks();
             sendResponse({
-                isRunning: isAutoClickingEnabled,
+                isRunning: isRunning,
                 totalLinks: links.length,
                 currentIndex: currentIndex,
-                hasNextPage: !!nextButton
+                hasNextPage: !!findNextPageButton(),
+                debugMode: debugMode
             });
-        } else if (request.action === 'setDelay') {
-            clickDelay = request.delay;
-            sendResponse({success: true});
-        } else if (request.action === 'getCaseNumber') {
-            const caseNumber = getCaseNumber();
-            sendResponse({caseNumber: caseNumber});
         } else if (request.action === 'testLinks') {
-            testDocumentLinks();
-            const links = findDocumentLinks();
-            sendResponse({success: true, linksFound: links.length});
-        } else if (request.action === 'pdfTabOpened') {
-            console.log('PDF tab opened notification:', request.tabId);
-            sendResponse({success: true});
-        } else if (request.action === 'pdfProcessingComplete') {
-            console.log('PDF processing complete:', request.success, request.downloadId);
-            // No longer need to handle callbacks since we process concurrently
+            const result = testLinks();
+            sendResponse(result);
+        } else if (request.action === 'getCaseNumber') {
+            sendResponse({caseNumber: getCaseNumber()});
+        } else if (request.action === 'setDelay') {
+            baseClickDelay = request.delay;
+            console.log(`Updated base click delay to ${baseClickDelay}ms`);
             sendResponse({success: true});
         }
     });
-
-    // Add visual indicator when extension is active
-    function addIndicator() {
-        if (document.getElementById('hcdc-auto-clicker-indicator')) return;
-
-        const manifest = chrome.runtime.getManifest();
-        const indicator = document.createElement('div');
-        indicator.id = 'hcdc-auto-clicker-indicator';
-        indicator.style.cssText = `
-            position: fixed;
-            top: 10px;
-            right: 10px;
-            background: #4CAF50;
-            color: white;
-            padding: 8px 12px;
-            border-radius: 4px;
-            font-family: Arial, sans-serif;
-            font-size: 12px;
-            z-index: 10000;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-        `;
-        indicator.textContent = `HCDC Auto Clicker Ready v${manifest.version}`;
-        document.body.appendChild(indicator);
-
-        // Remove indicator after 3 seconds
-        setTimeout(() => {
-            if (indicator.parentNode) {
-                indicator.parentNode.removeChild(indicator);
-            }
-        }, 3000);
     }
 
-    // Check if we're on the correct page
-    if (!window.location.href.includes('/Edocs/Public/CaseDetails.aspx')) {
-        console.log('Not on CaseDetails page, extension inactive');
-        return;
-    }
-
-    // Initialize when page loads
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', addIndicator);
-    } else {
-        addIndicator();
-    }
-
-    // Get version from manifest for debugging
-    const manifest = chrome.runtime.getManifest();
-    const instanceId = Math.random().toString(36).substr(2, 9);
-    console.log('🚀 =================================');
-    console.log(`🚀 Harris County District Clerk Auto Clicker v${manifest.version} content script loaded on CaseDetails page`);
-    console.log('🚀 Extension loaded at:', new Date().toISOString());
-    console.log('🚀 SEQUENTIAL WITH DEBUGGING VERSION');
-    console.log('🚀 Instance ID:', instanceId);
-    console.log('🚀 Current URL:', window.location.href);
-    console.log('🚀 =================================');
-    
-    // Add a global test function to verify version
-    window.checkExtensionVersion = function() {
-        console.log('✅ Extension Version Check:');
-        console.log(`✅ Version: ${manifest.version}`);
-        console.log('✅ Processing Mode: SEQUENTIAL WITH PERSISTENCE');
-        console.log('✅ Functions available:', {
-            findDocumentLinks: typeof findDocumentLinks,
-            startAutoClicking: typeof startAutoClicking,
-            processLink: typeof processLink
-        });
-        return `v${manifest.version} - SEQUENTIAL WITH PERSISTENCE`;
-    };
-    
-    // Load persisted state if any exists (disabled for debugging)
-    // loadPersistedState();
+    console.log('HCDC Auto Clicker content script loaded');
 })(); 

@@ -4,159 +4,213 @@
     <meta charset="utf-8">
     <style>
         body {
-            width: 300px;
-            padding: 20px;
+            width: 320px;
+            padding: 16px;
             font-family: Arial, sans-serif;
-            margin: 0;
+            font-size: 14px;
         }
         
         .header {
             text-align: center;
-            margin-bottom: 20px;
+            margin-bottom: 16px;
         }
         
-        .title {
-            font-size: 16px;
-            font-weight: bold;
-            color: #333;
-            margin-bottom: 5px;
-        }
-        
-        .subtitle {
-            font-size: 12px;
+        .version {
             color: #666;
+            font-size: 12px;
         }
         
         .status {
-            background: #f5f5f5;
-            padding: 10px;
+            margin-bottom: 16px;
+            padding: 8px;
             border-radius: 4px;
-            margin-bottom: 15px;
-            font-size: 14px;
+            text-align: center;
+            font-weight: bold;
         }
         
+        .status.ready { background-color: #e8f5e8; color: #2d5a2d; }
+        .status.running { background-color: #e8f0ff; color: #1a4480; }
+        .status.error { background-color: #ffe8e8; color: #8b0000; }
+        
         .controls {
-            margin-bottom: 15px;
+            margin-bottom: 16px;
         }
         
         .control-group {
-            margin-bottom: 10px;
+            margin-bottom: 12px;
         }
         
-        label {
+        .control-group label {
             display: block;
-            font-size: 12px;
-            color: #333;
-            margin-bottom: 5px;
+            margin-bottom: 4px;
+            font-weight: bold;
         }
         
-        label input[type="checkbox"] {
-            margin-right: 8px;
-        }
-        
-        input[type="range"] {
-            width: 100%;
-        }
-        
-        .delay-display {
-            text-align: center;
-            font-size: 12px;
-            color: #666;
-            margin-top: 5px;
-        }
-        
-        .buttons {
+        .button-group {
             display: flex;
-            gap: 10px;
+            gap: 8px;
+            margin-bottom: 12px;
         }
         
         button {
             flex: 1;
-            padding: 10px;
+            padding: 8px 16px;
             border: none;
             border-radius: 4px;
-            font-size: 14px;
             cursor: pointer;
-            transition: background-color 0.2s;
+            font-size: 14px;
+            font-weight: bold;
         }
         
-        .start-btn {
-            background: #4CAF50;
-            color: white;
-        }
-        
-        .start-btn:hover {
-            background: #45a049;
-        }
-        
-        .stop-btn {
-            background: #f44336;
-            color: white;
-        }
-        
-        .stop-btn:hover {
-            background: #da190b;
-        }
-        
-        .start-btn:disabled,
-        .stop-btn:disabled {
-            background: #cccccc;
+        button:disabled {
+            opacity: 0.5;
             cursor: not-allowed;
         }
         
-        .warning {
-            background: #fff3cd;
-            border: 1px solid #ffeaa7;
-            color: #856404;
+        .btn-primary {
+            background-color: #007cba;
+            color: white;
+        }
+        
+        .btn-primary:hover:not(:disabled) {
+            background-color: #005a87;
+        }
+        
+        .btn-secondary {
+            background-color: #6c757d;
+            color: white;
+        }
+        
+        .btn-secondary:hover:not(:disabled) {
+            background-color: #545b62;
+        }
+        
+        .btn-test {
+            background-color: #28a745;
+            color: white;
+        }
+        
+        .btn-test:hover:not(:disabled) {
+            background-color: #1e7e34;
+        }
+        
+        .slider-container {
+            margin-bottom: 8px;
+        }
+        
+        .slider {
+            width: 100%;
+            margin: 8px 0;
+        }
+        
+        .slider-value {
+            text-align: center;
+            font-weight: bold;
+            color: #007cba;
+        }
+        
+        .info-section {
+            background-color: #f8f9fa;
             padding: 8px;
             border-radius: 4px;
+            margin-bottom: 8px;
             font-size: 12px;
-            margin-top: 10px;
+        }
+        
+        .info-section.hidden {
+            display: none;
+        }
+        
+        .info-label {
+            font-weight: bold;
+            color: #495057;
+        }
+        
+        .info-value {
+            color: #007cba;
+        }
+        
+        .checkbox-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 12px;
+            padding: 8px;
+            background-color: #fff3cd;
+            border-radius: 4px;
+            border: 1px solid #ffeaa7;
+        }
+        
+        .checkbox-container input[type="checkbox"] {
+            transform: scale(1.2);
+        }
+        
+        .checkbox-container label {
+            margin: 0;
+            font-weight: bold;
+            color: #856404;
+            cursor: pointer;
+        }
+        
+        .debug-info {
+            font-size: 11px;
+            color: #6c757d;
+            margin-top: 4px;
         }
     </style>
 </head>
 <body>
     <div class="header">
-        <div class="title">HCDC Auto Clicker</div>
-        <div class="subtitle">Harris County District Clerk (Safari)</div>
-        <div class="version" id="versionDisplay" style="font-size: 10px; color: #999; margin-top: 3px;">v1.1</div>
+        <h3>HCDC Auto Clicker</h3>
+        <div class="version" id="versionDisplay">v1.2</div>
     </div>
     
-    <div class="status" id="status">
-        <div>Status: <span id="statusText">Checking...</span></div>
-        <div id="caseNumber" style="display: none;">Case: <span id="caseNumberText">Unknown</span></div>
-        <div id="linkCount" style="display: none;">Links found: <span id="linkCountText">0</span></div>
-        <div id="pagination" style="display: none;">Pages: <span id="paginationText">Single page</span></div>
-        <div id="progress" style="display: none;">Progress: <span id="progressText">0/0</span></div>
+    <div class="status ready" id="statusText">Ready</div>
+    
+    <div class="checkbox-container">
+        <input type="checkbox" id="debugMode" checked>
+        <label for="debugMode">Debug Mode</label>
+        <div class="debug-info">Only downloads first and last documents per page</div>
     </div>
     
     <div class="controls">
-        <div class="control-group">
-            <label for="delaySlider">Click Delay (seconds):</label>
-            <input type="range" id="delaySlider" min="1" max="10" value="3" step="0.5">
-            <div class="delay-display" id="delayDisplay">3.0 seconds</div>
+        <div class="button-group">
+            <button id="startBtn" class="btn-primary">Start</button>
+            <button id="stopBtn" class="btn-secondary" disabled>Stop</button>
         </div>
+        
+        <button id="testBtn" class="btn-test">Test Links</button>
+        
         <div class="control-group">
-            <label>
-                <input type="checkbox" id="autoDownload" checked>
-                Auto-download PDFs
-            </label>
+            <label for="delaySlider">Delay Between Clicks:</label>
+            <div class="slider-container">
+                <input type="range" id="delaySlider" class="slider" min="0.1" max="5.0" step="0.1" value="0.5">
+                <div class="slider-value" id="delayDisplay">0.5 seconds</div>
+            </div>
         </div>
     </div>
     
-    <div class="buttons">
-        <button id="startBtn" class="start-btn">Start Auto Click</button>
-        <button id="stopBtn" class="stop-btn" disabled>Stop</button>
+    <div class="info-section" id="caseNumber">
+        <span class="info-label">Case Number:</span>
+        <span class="info-value" id="caseNumberText">-</span>
     </div>
     
-    <div class="buttons" style="margin-top: 10px;">
-        <button id="testBtn" style="background: #2196F3; color: white; padding: 8px; border: none; border-radius: 4px; cursor: pointer; width: 100%;">Test Link Detection</button>
+    <div class="info-section" id="linkCount">
+        <span class="info-label">Documents Found:</span>
+        <span class="info-value" id="linkCountText">-</span>
     </div>
     
-    <div class="warning">
-        <strong>Note:</strong> This extension will automatically click on all document image links and download the PDFs to a subfolder in your Downloads folder named after the case number. Safari version has limited duplicate checking - manually check for existing files. Make sure you're on the correct page before starting.
+    <div class="info-section" id="pagination">
+        <span class="info-label">Pages:</span>
+        <span class="info-value" id="paginationText">-</span>
     </div>
     
+    <div class="info-section hidden" id="progress">
+        <span class="info-label">Progress:</span>
+        <span class="info-value" id="progressText">-</span>
+    </div>
+
     <script src="popup.js"></script>
 </body>
+</html> 
 </html> 
