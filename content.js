@@ -11,6 +11,46 @@
     let baseClickDelay = 500; // Base delay in milliseconds
     let debugMode = false; // Debug mode flag
     
+    // Loop protection and emergency brakes
+    let totalProcessedCount = 0;
+    let pageProcessingStartTime = 0;
+    let emergencyStopTriggered = false;
+    const MAX_DOCUMENTS_PER_SESSION = 1000;
+    const MAX_PAGE_PROCESSING_TIME = 300000; // 5 minutes per page
+    const MAX_PAGES_PER_SESSION = 50;
+    const MAX_RETRIES_PER_OPERATION = 3;
+    
+    function checkEmergencyConditions() {
+        const now = Date.now();
+        
+        // Check document count limit
+        if (totalProcessedCount >= MAX_DOCUMENTS_PER_SESSION) {
+            console.log(`EMERGENCY STOP: Processed ${totalProcessedCount} documents (limit: ${MAX_DOCUMENTS_PER_SESSION})`);
+            return true;
+        }
+        
+        // Check page processing time
+        if (pageProcessingStartTime && (now - pageProcessingStartTime) > MAX_PAGE_PROCESSING_TIME) {
+            console.log(`EMERGENCY STOP: Page processing exceeded ${MAX_PAGE_PROCESSING_TIME/1000}s`);
+            return true;
+        }
+        
+        // Check page count
+        if (currentPageNumber > MAX_PAGES_PER_SESSION) {
+            console.log(`EMERGENCY STOP: Exceeded ${MAX_PAGES_PER_SESSION} pages`);
+            return true;
+        }
+        
+        return false;
+    }
+    
+    function triggerEmergencyStop(reason = 'Unknown') {
+        if (emergencyStopTriggered) return;
+        emergencyStopTriggered = true;
+        console.log(`🚨 EMERGENCY STOP TRIGGERED: ${reason}`);
+        stopProcessing();
+    }
+    
     // Inject page bridge script once per page load
     function ensurePageBridge() {
         if (document.getElementById('hcdc-page-bridge')) return;
@@ -29,6 +69,8 @@
     // Track current page to prevent infinite loops
     let currentPageNumber = 1;
     let lastPageChangeTime = 0;
+
+    let cachedNextButton = null;
 
     // Restore running state after page navigation
     const persisted = (() => {
@@ -352,6 +394,12 @@
 
     // Function to process next document
     function processNextDocument() {
+        // Emergency brake check
+        if (checkEmergencyConditions()) {
+            triggerEmergencyStop('Emergency conditions met');
+            return;
+        }
+        
         if (!isRunning || currentIndex >= documentLinks.length) {
             console.log(`DEBUG: processNextDocument called but not processing - isRunning: ${isRunning}, currentIndex: ${currentIndex}, documentLinks.length: ${documentLinks.length}`);
             return;
@@ -373,6 +421,7 @@
             activeDownloads--;
             
             if (success) {
+                totalProcessedCount++;
                 console.log(`Document ${docIndex} processed successfully`);
             } else {
                 console.log(`Document ${docIndex} failed to process`);
@@ -383,7 +432,7 @@
                 if (isRunning && currentIndex < documentLinks.length && activeDownloads < maxConcurrentDownloads) {
                     processNextDocument();
                 } else if (isRunning && currentIndex >= documentLinks.length && activeDownloads === 0) {
-                    console.log('All documents on current page processed. Checking for next page...');
+                    console.log(`All documents on current page processed (${totalProcessedCount} total). Checking for next page...`);
                     checkForNextPage();
                 }
             }, getHumanlikeDelay());
@@ -446,26 +495,41 @@
 
     // Verify that a new page has actually loaded before restarting processing
     function checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount = 0) {
+        // Emergency brake
+        if (checkEmergencyConditions()) {
+            triggerEmergencyStop('Emergency conditions met during page check');
+            return;
+        }
+        
+        // Prevent infinite retry loops
+        if (retryCount >= MAX_RETRIES_PER_OPERATION) {
+            console.log(`Max retries (${MAX_RETRIES_PER_OPERATION}) exceeded for page change detection`);
+            triggerEmergencyStop('Max retries exceeded');
+            return;
+        }
+        
         const currentUrl = window.location.href;
         const newLinks = findDocumentLinks();
 
         if (currentUrl === previousUrl && newLinks.length === previousDocCount) {
-            if (retryCount < 5) {
-                console.log(`Page hasn't changed yet, retrying... (${retryCount + 1}/5)`);
+            if (retryCount < MAX_RETRIES_PER_OPERATION) {
+                console.log(`Page hasn't changed yet, retrying... (${retryCount + 1}/${MAX_RETRIES_PER_OPERATION})`);
                 setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount + 1), getRandomDelay(1000));
                 return;
             } else {
-                console.log('Page failed to change after retries, stopping');
+                console.log(`Page failed to change after ${MAX_RETRIES_PER_OPERATION} retries, stopping`);
                 stopProcessing();
                 return;
             }
         }
 
         if (newLinks.length > 0) {
-            console.log(`New page loaded with ${newLinks.length} documents`);
+            console.log(`New page loaded with ${newLinks.length} documents (page ${targetPageNumber})`);
             currentPageNumber = targetPageNumber;
-            console.log(`Now on page ${currentPageNumber}`);
+            pageProcessingStartTime = Date.now(); // Reset page timer
+            console.log(`Now on page ${currentPageNumber} (${totalProcessedCount} documents processed so far)`);
             processedDocuments.clear();
+            cachedNextButton = null; // Clear next button cache on new page
             documentLinks = newLinks;
             currentIndex = 0;
             activeDownloads = 0;
@@ -475,21 +539,26 @@
                 processNextDocument();
             }
         } else {
-            if (retryCount < 3) {
+            if (retryCount < MAX_RETRIES_PER_OPERATION) {
                 setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount + 1), getRandomDelay(500));
             } else {
-                console.log('No documents found on new page, stopping');
+                console.log(`No documents found on new page after ${MAX_RETRIES_PER_OPERATION} retries, stopping`);
                 stopProcessing();
             }
         }
     }
 
-    // Function to find next page button
+    // Function to find next page button (cached until page navigation)
     function findNextPageButton() {
+        if (cachedNextButton !== null) {
+            return cachedNextButton;
+        }
+        
         // Look for the specific next page button pattern
         const nextButton = document.querySelector('a.PagerHyperlinkStyle[href*="__doPostBack"][title*="Next"]');
         if (nextButton && !nextButton.disabled) {
             console.log(`Found next page button: ${nextButton.title}`);
+            cachedNextButton = nextButton;
             return nextButton;
         }
         
@@ -510,6 +579,7 @@
             const button = document.querySelector(selector);
             if (button && !button.disabled) {
                 console.log(`Found next page button with selector: ${selector}`);
+                cachedNextButton = button;
                 return button;
             }
         }
@@ -519,19 +589,26 @@
         for (const link of paginationLinks) {
             if (link.textContent.includes('»') || link.textContent.includes('>') || link.textContent.includes('Next')) {
                 console.log(`Found pagination link: ${link.textContent.trim()}`);
+                cachedNextButton = link;
                 return link;
             }
         }
         
-        return null;
+        return (cachedNextButton = null);
     }
 
     // Function to start processing
     function startProcessing() {
         if (isRunning) return;
         
+        // Reset emergency state
+        emergencyStopTriggered = false;
+        totalProcessedCount = 0;
+        pageProcessingStartTime = Date.now();
+        
         console.log('Starting document processing...');
         console.log(`Debug mode: ${debugMode ? 'ENABLED' : 'DISABLED'}`);
+        console.log(`Safety limits: ${MAX_DOCUMENTS_PER_SESSION} docs, ${MAX_PAGES_PER_SESSION} pages, ${MAX_PAGE_PROCESSING_TIME/1000}s per page`);
         isRunning = true;
         
         // Reset page tracking
@@ -590,11 +667,12 @@
 
     // Function to stop processing
     function stopProcessing() {
-        console.log('Stopping document processing...');
+        console.log(`Stopping document processing... (processed ${totalProcessedCount} documents total)`);
         isRunning = false;
         currentIndex = 0;
         activeDownloads = 0;
         documentLinks = [];
+        pageProcessingStartTime = 0;
 
         // Clear persisted state
         sessionStorage.removeItem('hcdc_auto_click_state');
@@ -603,57 +681,4 @@
     // Function to test link detection
     function testLinks() {
         const links = findDocumentLinks();
-        console.log(`=== LINK DETECTION TEST ===`);
-        console.log(`Found ${links.length} document links`);
-        
-        links.forEach((link, index) => {
-            const docInfo = extractDocumentInfo(link);
-            console.log(`${index + 1}. Document ${docInfo.number}: ${docInfo.title}`);
-            console.log(`   Link: ${link.href.substring(0, 100)}...`);
-        });
-        
-        const nextButton = findNextPageButton();
-        console.log(`Next page button: ${nextButton ? 'Found' : 'Not found'}`);
-        if (nextButton) {
-            console.log(`Next button: ${nextButton.outerHTML.substring(0, 100)}...`);
-        }
-        
-        return { linksFound: links.length, hasNextPage: !!nextButton };
-    }
-
-    // Message listener
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
-        chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-        if (request.action === 'startAutoClick') {
-            debugMode = request.debugMode || false;
-            // Serial processing in debug mode to avoid tab-closing race conditions
-            if (debugMode) maxConcurrentDownloads = 1;
-            startProcessing();
-            sendResponse({success: true, count: documentLinks.length, debugMode: debugMode});
-        } else if (request.action === 'stopAutoClick') {
-            stopProcessing();
-            sendResponse({success: true});
-        } else if (request.action === 'getStatus') {
-            const links = isRunning ? documentLinks : findDocumentLinks();
-            sendResponse({
-                isRunning: isRunning,
-                totalLinks: links.length,
-                currentIndex: currentIndex,
-                hasNextPage: !!findNextPageButton(),
-                debugMode: debugMode
-            });
-        } else if (request.action === 'testLinks') {
-            const result = testLinks();
-            sendResponse(result);
-        } else if (request.action === 'getCaseNumber') {
-            sendResponse({caseNumber: getCaseNumber()});
-        } else if (request.action === 'setDelay') {
-            baseClickDelay = request.delay;
-            console.log(`Updated base click delay to ${baseClickDelay}ms`);
-            sendResponse({success: true});
-        }
-    });
-    }
-
-    console.log('HCDC Auto Clicker content script loaded');
-})(); 
+        console.log(`
