@@ -1,0 +1,41 @@
+{
+    "manifest_version": 2,
+    "name": "Harris County District Clerk Auto Clicker",
+    "version": "2.1",
+    "description": "Automatically clicks on document image links in Harris County District Clerk pages",
+    
+    "permissions": [
+        "activeTab",
+        "tabs",
+        "downloads",
+        "*://www.hcdistrictclerk.com/*",
+        "*://hcdistrictclerk.com/*"
+    ],
+    
+    "background": {
+        "scripts": ["background.js"],
+        "persistent": false
+    },
+    
+    "content_scripts": [
+        {
+            "matches": ["*://www.hcdistrictclerk.com/Edocs/Public/CaseDetails.aspx*"],
+            "js": ["content.js"],
+            "run_at": "document_end"
+        }
+    ],
+    
+    "browser_action": {
+        "default_popup": "popup.html",
+        "default_title": "Harris County District Clerk Auto Clicker"
+    },
+    
+    "web_accessible_resources": ["bridge.js"],
+    
+    "icons": {
+        "16": "icon16.png",
+        "32": "icon32.png",
+        "48": "icon48.png",
+        "128": "icon128.png"
+    }
+} 
