@@ -7,18 +7,29 @@
     let currentIndex = 0;
     let documentLinks = [];
     let activeDownloads = 0;
-    let maxConcurrentDownloads = 3;
-    let baseClickDelay = 500; // Base delay in milliseconds
+    let maxConcurrentDownloads = 1; // Reduced from 3 to limit request frequency
+    let baseClickDelay = 5000; // Increased from 3000ms to 5 seconds minimum
     let debugMode = false; // Debug mode flag
+    
+    // Rate limiting system to comply with 25 hits/60s threshold (staying under 20)
+    // Tracks all trackable requests to edocs_public_viewfilepage_aspx:
+    // - PDF viewer tab creation (document processing)
+    // - Page navigation clicks (__doPostBack requests)
+    const RATE_LIMIT_WINDOW = 60000; // 60 seconds
+    const MAX_REQUESTS_PER_WINDOW = 18; // Stay well under 20 to be safe
+    let requestTimestamps = []; // Track all trackable requests
     
     // Loop protection and emergency brakes
     let totalProcessedCount = 0;
-    let pageProcessingStartTime = 0;
+    let pageProcessingStartTime = Date.now();
     let emergencyStopTriggered = false;
     const MAX_DOCUMENTS_PER_SESSION = 1000;
     const MAX_PAGE_PROCESSING_TIME = 300000; // 5 minutes per page
     const MAX_PAGES_PER_SESSION = 50;
     const MAX_RETRIES_PER_OPERATION = 3;
+    
+    let processedDocuments = new Set(); // Track processed document IDs
+    let processingDocument = false; // Flag to prevent concurrent document processing
     
     function checkEmergencyConditions() {
         const now = Date.now();
@@ -29,11 +40,7 @@
             return true;
         }
         
-        // Check page processing time
-        if (pageProcessingStartTime && (now - pageProcessingStartTime) > MAX_PAGE_PROCESSING_TIME) {
-            console.log(`EMERGENCY STOP: Page processing exceeded ${MAX_PAGE_PROCESSING_TIME/1000}s`);
-            return true;
-        }
+        // Removed page processing time check - long time on page does not raise alarm
         
         // Check page count
         if (currentPageNumber > MAX_PAGES_PER_SESSION) {
@@ -63,9 +70,6 @@
     // Ensure bridge is injected ASAP
     ensurePageBridge();
     
-    // Track processed documents in this session to prevent duplicates
-    let processedDocuments = new Set();
-    
     // Track current page to prevent infinite loops
     let currentPageNumber = 1;
     let lastPageChangeTime = 0;
@@ -83,20 +87,58 @@
         setTimeout(() => startProcessing(), 0); // start once helpers are defined
     }
 
+    // Rate limiting functions
+    function recordRequest() {
+        const now = Date.now();
+        requestTimestamps.push(now);
+        
+        // Clean old timestamps outside the window
+        requestTimestamps = requestTimestamps.filter(timestamp => 
+            now - timestamp < RATE_LIMIT_WINDOW
+        );
+        
+        console.log(`Rate limit: ${requestTimestamps.length}/${MAX_REQUESTS_PER_WINDOW} requests in last 60s`);
+    }
+    
+    function canMakeRequest() {
+        const now = Date.now();
+        // Clean old timestamps
+        requestTimestamps = requestTimestamps.filter(timestamp => 
+            now - timestamp < RATE_LIMIT_WINDOW
+        );
+        
+        const canProceed = requestTimestamps.length < MAX_REQUESTS_PER_WINDOW;
+        if (!canProceed) {
+            console.log(`Rate limit reached: ${requestTimestamps.length}/${MAX_REQUESTS_PER_WINDOW} requests in last 60s`);
+        }
+        return canProceed;
+    }
+    
+    function getTimeUntilNextRequest() {
+        if (requestTimestamps.length < MAX_REQUESTS_PER_WINDOW) {
+            return 0;
+        }
+        
+        const now = Date.now();
+        const oldestRequest = Math.min(...requestTimestamps);
+        const timeUntilExpiry = RATE_LIMIT_WINDOW - (now - oldestRequest);
+        return Math.max(0, timeUntilExpiry);
+    }
+
     // Function to generate random delay between min and max (inclusive)
     function getRandomDelay(baseDelay = baseClickDelay) {
-        // Random delay between 50% to 200% of base delay
-        const minDelay = Math.floor(baseDelay * 0.5);
-        const maxDelay = Math.floor(baseDelay * 2.0);
+        // Random delay between 100% to 150% of base delay (more conservative)
+        const minDelay = baseDelay;
+        const maxDelay = Math.floor(baseDelay * 1.5);
         const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
         console.log(`Random delay: ${randomDelay}ms (base: ${baseDelay}ms, range: ${minDelay}-${maxDelay}ms)`);
         return randomDelay;
     }
 
-    // Function to generate humanlike random pauses (1-3 seconds)
+    // Function to generate humanlike random pauses (3-7 seconds, increased from 1-3)
     function getHumanlikeDelay() {
-        const minDelay = 1000; // 1 second
-        const maxDelay = 3000; // 3 seconds
+        const minDelay = 3000; // 3 seconds
+        const maxDelay = 7000; // 7 seconds
         const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
         console.log(`Humanlike delay: ${randomDelay}ms (range: ${minDelay}-${maxDelay}ms)`);
         return randomDelay;
@@ -127,6 +169,105 @@
         }
         
         return Array.from(links);
+    }
+
+    // Function to extract defendant name from page
+    function getDefendantName() {
+        // Try various selectors to find defendant name
+        const selectors = [
+            'span[id*="Defendant"]',
+            'span[id*="defendant"]',
+            '.defendant-name'
+        ];
+        
+        let defendantName = null;
+        
+        // Try direct selectors first
+        for (const selector of selectors) {
+            const element = document.querySelector(selector);
+            if (element && element.textContent.trim()) {
+                defendantName = element.textContent.trim();
+                break;
+            }
+        }
+        
+        // If not found, look for patterns in all text elements
+        if (!defendantName) {
+            const textElements = document.querySelectorAll('td, span, div, p');
+            for (const element of textElements) {
+                const text = element.textContent.trim();
+                if (!text) continue;
+                
+                // Look for "Defendant: Name" pattern
+                const defMatch = text.match(/defendant:\s*(.+)/i);
+                if (defMatch) {
+                    defendantName = defMatch[1].trim();
+                    break;
+                }
+                
+                // Look for "vs. Name" pattern (defendant is usually after "vs.")
+                const vsMatch = text.match(/\bvs\.?\s+([A-Za-z\s,.-]+)/i);
+                if (vsMatch) {
+                    let possibleName = vsMatch[1].trim();
+                    // Clean up common suffixes that aren't part of names
+                    possibleName = possibleName.replace(/\s*-.*$/, '').trim();
+                    possibleName = possibleName.replace(/\s*\|.*$/, '').trim();
+                    possibleName = possibleName.replace(/\s*\(.*$/, '').trim();
+                    if (possibleName.length > 2) {
+                        defendantName = possibleName;
+                        break;
+                    }
+                }
+                
+                // Look for elements that might contain defendant names
+                if (element.textContent.toLowerCase().includes('defendant') && 
+                    !element.textContent.toLowerCase().includes('plaintiff')) {
+                    // Extract text after "defendant"
+                    const afterDefendant = text.match(/defendant[:\s]*([A-Za-z\s,.-]+)/i);
+                    if (afterDefendant) {
+                        let possibleName = afterDefendant[1].trim();
+                        possibleName = possibleName.replace(/\s*-.*$/, '').trim();
+                        if (possibleName.length > 2) {
+                            defendantName = possibleName;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If still not found, try page title
+        if (!defendantName) {
+            const pageTitle = document.title;
+            // Look for "State vs Name" or "v. Name" patterns
+            const titleMatch = pageTitle.match(/(?:vs?\.?\s+|v\.?\s+)([^-|]+)/i);
+            if (titleMatch) {
+                defendantName = titleMatch[1].trim();
+            }
+        }
+        
+        if (!defendantName) {
+            return 'Unknown, Unknown';
+        }
+        
+        // Parse name into Last, First format
+        defendantName = defendantName.replace(/[^\w\s,.-]/g, '').trim(); // Remove special chars
+        
+        // If already in "Last, First" format, return as is
+        if (defendantName.includes(',')) {
+            return defendantName;
+        }
+        
+        // If in "First Last" format, convert to "Last, First"
+        const nameParts = defendantName.split(/\s+/);
+        if (nameParts.length >= 2) {
+            const firstName = nameParts.slice(0, -1).join(' ');
+            const lastName = nameParts[nameParts.length - 1];
+            return `${lastName}, ${firstName}`;
+        }
+        
+        // Single name - treat as last name
+        return `${defendantName}, Unknown`;
     }
 
     // Function to get case number from the page
@@ -161,22 +302,27 @@
         }
         
         if (!fullCaseNumber) {
-            return 'unknown_case';
+            fullCaseNumber = 'unknown_case';
         }
         
-        // Extract first 7 digits only for the download folder
+        // Extract first 7 digits only for the case number part
+        let caseNumber = fullCaseNumber;
         const digitMatch = fullCaseNumber.match(/\d{7}/);
         if (digitMatch) {
-            return digitMatch[0];
+            caseNumber = digitMatch[0];
+        } else {
+            // Fallback: extract any digits and take first 7
+            const allDigits = fullCaseNumber.replace(/\D/g, '');
+            if (allDigits.length >= 7) {
+                caseNumber = allDigits.substring(0, 7);
+            }
         }
         
-        // Fallback: extract any digits and take first 7
-        const allDigits = fullCaseNumber.replace(/\D/g, '');
-        if (allDigits.length >= 7) {
-            return allDigits.substring(0, 7);
-        }
+        // Get defendant name and format folder name
+        const defendantName = getDefendantName();
         
-        return fullCaseNumber; // Return original if less than 7 digits
+        // Return formatted folder name: "{defendant last name}, {defendant first name} {case number}"
+        return `${defendantName} ${caseNumber}`;
     }
 
     // Function to extract document information from table row
@@ -338,54 +484,84 @@
             processedDocuments.add(sessionKey);
 
             console.log(`Processing document ${docInfo.number}: ${docInfo.title}`);
-            console.log(`Opening URL: ${fullUrl.substring(0, 100)}...`);
 
-            // Add humanlike pause before processing document
-            setTimeout(() => {
-                console.log(`DEBUG: Starting document processing after humanlike delay`);
-                console.log(`DEBUG: Document info being processed:`, {
-                    number: docInfo.number,
-                    title: docInfo.title,
-                    caseNumber: caseNumber,
-                    url: fullUrl.substring(0, 100) + '...'
-                });
+            // Check if document already exists before opening PDF tab
+            console.log(`DEBUG: Checking if document ${docInfo.number} already exists...`);
+            chrome.runtime.sendMessage({
+                action: 'checkDocumentExists',
+                documentNumber: docInfo.number
+            }, (existsResponse) => {
+                if (chrome.runtime.lastError) {
+                    console.log(`DEBUG: Chrome runtime error checking document existence:`, chrome.runtime.lastError);
+                    // Continue with processing if check fails
+                } else if (existsResponse && existsResponse.exists) {
+                    console.log(`Document ${docInfo.number} already exists, skipping download:`, existsResponse.existingFiles);
+                    callback(true); // Return true so it's considered "processed successfully"
+                    return;
+                }
                 
-                // Send message to background script to open PDF tab
-                console.log(`DEBUG: Sending message to background with:`, {
-                    action: 'openPDFTabWithCallback',
-                    url: fullUrl,
-                    documentNumber: docInfo.number,
-                    documentTitle: docInfo.title,
-                    caseNumber: caseNumber
-                });
-                
-                chrome.runtime.sendMessage({
-                    action: 'openPDFTabWithCallback',
-                    url: fullUrl,
-                    documentNumber: docInfo.number,
-                    documentTitle: docInfo.title,
-                    caseNumber: caseNumber
-                }, (response) => {
-                    console.log(`DEBUG: Received response for document ${docInfo.number}:`, response);
-                    
-                    if (chrome.runtime.lastError) {
-                        console.log(`DEBUG: Chrome runtime error:`, chrome.runtime.lastError);
-                        callback(false);
+                console.log(`Document ${docInfo.number} not found locally, proceeding with download...`);
+                console.log(`Opening URL: ${fullUrl.substring(0, 100)}...`);
+
+                // Check rate limiting before processing
+                function attemptDocumentProcessing() {
+                    if (!canMakeRequest()) {
+                        const waitTime = getTimeUntilNextRequest();
+                        console.log(`Rate limit reached, waiting ${Math.ceil(waitTime/1000)}s before processing document ${docInfo.number}`);
+                        setTimeout(attemptDocumentProcessing, waitTime + 1000); // Add 1s buffer
                         return;
                     }
                     
-                    if (response && response.success) {
-                        console.log(`Successfully processed document ${docInfo.number}: ${response.downloadSuccess ? 'Downloaded' : 'Skipped'}`);
-                        if (response.skipped) {
-                            console.log(`Document skipped: ${response.reason}`);
+                    recordRequest(); // Record this request
+                    
+                    console.log(`DEBUG: Starting document processing after rate limit check`);
+                    console.log(`DEBUG: Document info being processed:`, {
+                        number: docInfo.number,
+                        title: docInfo.title,
+                        caseNumber: caseNumber,
+                        url: fullUrl.substring(0, 100) + '...'
+                    });
+                    
+                    // Send message to background script to open PDF tab
+                    console.log(`DEBUG: Sending message to background with:`, {
+                        action: 'openPDFTabWithCallback',
+                        url: fullUrl,
+                        documentNumber: docInfo.number,
+                        documentTitle: docInfo.title,
+                        caseNumber: caseNumber
+                    });
+                    
+                    chrome.runtime.sendMessage({
+                        action: 'openPDFTabWithCallback',
+                        url: fullUrl,
+                        documentNumber: docInfo.number,
+                        documentTitle: docInfo.title,
+                        caseNumber: caseNumber
+                    }, (response) => {
+                        console.log(`DEBUG: Received response for document ${docInfo.number}:`, response);
+                        
+                        if (chrome.runtime.lastError) {
+                            console.log(`DEBUG: Chrome runtime error:`, chrome.runtime.lastError);
+                            callback(false);
+                            return;
                         }
-                        callback(response.downloadSuccess || response.skipped);
-                    } else {
-                        console.log(`Failed to process document ${docInfo.number}: ${response?.error || 'Unknown error'}`);
-                        callback(false);
-                    }
-                });
-            }, getHumanlikeDelay());
+                        
+                        if (response && response.success) {
+                            console.log(`Successfully processed document ${docInfo.number}: ${response.downloadSuccess ? 'Downloaded' : 'Skipped'}`);
+                            if (response.skipped) {
+                                console.log(`Document skipped: ${response.reason}`);
+                            }
+                            callback(response.downloadSuccess || response.skipped);
+                        } else {
+                            console.log(`Failed to process document ${docInfo.number}: ${response?.error || 'Unknown error'}`);
+                            callback(false);
+                        }
+                    });
+                }
+                
+                // Add humanlike pause before attempting processing
+                setTimeout(attemptDocumentProcessing, getHumanlikeDelay());
+            });
         } catch (error) {
             console.error('Error processing document:', error);
             callback(false);
@@ -394,22 +570,23 @@
 
     // Function to process next document
     function processNextDocument() {
-        // Emergency brake check
-        if (checkEmergencyConditions()) {
-            triggerEmergencyStop('Emergency conditions met');
-            return;
-        }
         
         if (!isRunning || currentIndex >= documentLinks.length) {
             console.log(`DEBUG: processNextDocument called but not processing - isRunning: ${isRunning}, currentIndex: ${currentIndex}, documentLinks.length: ${documentLinks.length}`);
             return;
         }
 
+        // Prevent multiple concurrent calls to processNextDocument
+        if (processingDocument) {
+            console.log('DEBUG: Already processing a document, skipping processNextDocument call');
+            return;
+        }
+
         const link = documentLinks[currentIndex];
         const docIndex = currentIndex + 1; // Capture the 1-based index for display
-        currentIndex++;
+        currentIndex++; // Increment immediately
         activeDownloads++;
-
+        
         console.log(`Processing document ${docIndex}/${documentLinks.length}`);
         
         // Debug: Log document info being processed
@@ -427,28 +604,30 @@
                 console.log(`Document ${docIndex} failed to process`);
             }
 
-            // Add humanlike delay before processing next document
-            setTimeout(() => {
-                if (isRunning && currentIndex < documentLinks.length && activeDownloads < maxConcurrentDownloads) {
-                    processNextDocument();
-                } else if (isRunning && currentIndex >= documentLinks.length && activeDownloads === 0) {
-                    console.log(`All documents on current page processed (${totalProcessedCount} total). Checking for next page...`);
-                    checkForNextPage();
-                }
-            }, getHumanlikeDelay());
+            // Process next document sequentially to maintain rate limiting
+            if (isRunning && currentIndex < documentLinks.length && activeDownloads < 1) {
+                processNextDocument();
+            }
+            
+            // Check for next page when all documents are processed
+            if (isRunning && currentIndex >= documentLinks.length && activeDownloads === 0) {
+                console.log(`All documents on current page processed (${totalProcessedCount} total). Checking for next page...`);
+                setTimeout(checkForNextPage, 1000);
+            }
         });
     }
 
     // Function to navigate to the next results page, if any
     function checkForNextPage() {
         const nextButton = findNextPageButton();
-        // Throttle rapid page changes
+        // Throttle rapid page changes (increased from 5s to 10s)
         const now = Date.now();
-        if (now - lastPageChangeTime < 5000) {
+        if (now - lastPageChangeTime < 10000) {
             console.log('Preventing rapid page change, waiting...');
-            setTimeout(checkForNextPage, 5000 - (now - lastPageChangeTime));
+            setTimeout(checkForNextPage, 10000 - (now - lastPageChangeTime));
             return;
         }
+        
         if (nextButton && !nextButton.disabled) {
             console.log(`Moving to next page from page ${currentPageNumber}...`);
             const previousUrl = window.location.href;
@@ -456,8 +635,17 @@
             lastPageChangeTime = now;
             const targetPageNumber = currentPageNumber + 1;
 
-            // Delay before navigation for humanlike behaviour
-            setTimeout(() => {
+            // Check rate limiting before navigation
+            function attemptPageNavigation() {
+                if (!canMakeRequest()) {
+                    const waitTime = getTimeUntilNextRequest();
+                    console.log(`Rate limit reached, waiting ${Math.ceil(waitTime/1000)}s before navigating to next page`);
+                    setTimeout(attemptPageNavigation, waitTime + 1000); // Add 1s buffer
+                    return;
+                }
+                
+                recordRequest(); // Record this request
+                
                 console.log('Clicking next page button…');
                 const match = nextButton.href ? nextButton.href.match(/__doPostBack\('([^']+)'\,'([^']+)'\)/) : null;
                 if (match) {
@@ -485,8 +673,11 @@
                     nextButton.click();
                 }
 
-                setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber), getRandomDelay(3000));
-            }, getRandomDelay());
+                setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber), getRandomDelay(5000));
+            }
+
+            // Delay before navigation for humanlike behaviour (increased delay)
+            setTimeout(attemptPageNavigation, getRandomDelay());
         } else {
             console.log('No next page found, processing complete');
             stopProcessing();
@@ -514,7 +705,7 @@
         if (currentUrl === previousUrl && newLinks.length === previousDocCount) {
             if (retryCount < MAX_RETRIES_PER_OPERATION) {
                 console.log(`Page hasn't changed yet, retrying... (${retryCount + 1}/${MAX_RETRIES_PER_OPERATION})`);
-                setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount + 1), getRandomDelay(1000));
+                setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount + 1), 1000);
                 return;
             } else {
                 console.log(`Page failed to change after ${MAX_RETRIES_PER_OPERATION} retries, stopping`);
@@ -532,15 +723,15 @@
             cachedNextButton = null; // Clear next button cache on new page
             documentLinks = newLinks;
             currentIndex = 0;
+            processingDocument = false; // Reset processing flag
             activeDownloads = 0;
 
-            console.log(`DEBUG: Starting to process ${Math.min(maxConcurrentDownloads, documentLinks.length)} documents on new page`);
-            for (let i = 0; i < Math.min(maxConcurrentDownloads, documentLinks.length); i++) {
-                processNextDocument();
-            }
+            console.log(`DEBUG: Starting to process documents on new page sequentially`);
+            // Start processing the first document only
+            processNextDocument();
         } else {
             if (retryCount < MAX_RETRIES_PER_OPERATION) {
-                setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount + 1), getRandomDelay(500));
+                setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount + 1), 500);
             } else {
                 console.log(`No documents found on new page after ${MAX_RETRIES_PER_OPERATION} retries, stopping`);
                 stopProcessing();
@@ -601,30 +792,24 @@
     function startProcessing() {
         if (isRunning) return;
         
-        // Reset emergency state
-        emergencyStopTriggered = false;
-        totalProcessedCount = 0;
-        pageProcessingStartTime = Date.now();
-        
-        console.log('Starting document processing...');
-        console.log(`Debug mode: ${debugMode ? 'ENABLED' : 'DISABLED'}`);
-        console.log(`Safety limits: ${MAX_DOCUMENTS_PER_SESSION} docs, ${MAX_PAGES_PER_SESSION} pages, ${MAX_PAGE_PROCESSING_TIME/1000}s per page`);
         isRunning = true;
-        
-        // Reset page tracking
+        totalProcessedCount = 0;
         currentPageNumber = 1;
-        lastPageChangeTime = 0;
+        pageProcessingStartTime = Date.now();
+        emergencyStopTriggered = false;
+        processingDocument = false; // Initialize processing flag
         
-        // Clear processed documents for new session
-        processedDocuments.clear();
+        console.log('HCDC Auto Clicker: Starting document processing...');
         
-        // Send case number to background and clear session downloads
+        // Get case number for folder naming
         const caseNumber = getCaseNumber();
+        console.log(`DEBUG: Case number for folder: ${caseNumber}`);
         
-        // Find documents on current page first
+        // Find all document links
         documentLinks = findDocumentLinks();
+        
         if (documentLinks.length === 0) {
-            console.log('No documents found');
+            console.log('No document links found');
             stopProcessing();
             return;
         }
@@ -648,16 +833,10 @@
         }, (response) => {
             console.log('DEBUG: Session cleared, starting document processing');
             
-            // Start processing documents after session is cleared
-            console.log(`DEBUG: Starting to process ${Math.min(maxConcurrentDownloads, documentLinks.length)} documents concurrently`);
-            
-            // Process documents with staggered delays between each
+            // Start processing multiple documents concurrently
+            console.log(`DEBUG: Starting concurrent document processing with max ${maxConcurrentDownloads} downloads`);
             for (let i = 0; i < Math.min(maxConcurrentDownloads, documentLinks.length); i++) {
-                const delay = i * 2000; // 2 second delay between each document start
-                setTimeout(() => {
-                    console.log(`DEBUG: Starting document ${i + 1} after ${delay}ms delay`);
-                    processNextDocument();
-                }, delay);
+                processNextDocument();
             }
 
             // Persist state for subsequent navigations
@@ -674,6 +853,16 @@
         documentLinks = [];
         pageProcessingStartTime = 0;
 
+        // Update status indicator
+        const startBtn = document.getElementById('hcdc-start-btn');
+        const stopBtn = document.getElementById('hcdc-stop-btn');
+        const statusText = document.getElementById('hcdc-status-text');
+        if (startBtn && stopBtn && statusText) {
+            startBtn.style.display = 'inline-block';
+            stopBtn.style.display = 'none';
+            statusText.textContent = `Processing stopped (${totalProcessedCount} documents processed)`;
+        }
+
         // Clear persisted state
         sessionStorage.removeItem('hcdc_auto_click_state');
     }
@@ -681,4 +870,267 @@
     // Function to test link detection
     function testLinks() {
         const links = findDocumentLinks();
-        console.log(`
+        console.log(`Found ${links.length} document links:`);
+        links.forEach((link, index) => {
+            const docInfo = extractDocumentInfo(link);
+            console.log(`${index + 1}: Number: "${docInfo.number}", Title: "${docInfo.title}"`);
+        });
+    }
+
+    // Make functions available globally for testing
+    window.startProcessing = startProcessing;
+    window.stopProcessing = stopProcessing;
+    window.testLinks = testLinks;
+
+    // Check for active auto-click session state on page load
+    const savedState = sessionStorage.getItem('hcdc_auto_click_state');
+    if (savedState) {
+        try {
+            const state = JSON.parse(savedState);
+            if (state.active) {
+                console.log('HCDC Auto Clicker: Detected active session, resuming processing...');
+                debugMode = state.debugMode || false;
+                baseClickDelay = state.baseClickDelay || 5000;
+                maxConcurrentDownloads = debugMode ? 1 : 1; // Keep serial processing
+                
+                // Small delay to let page settle before resuming
+                setTimeout(startProcessing, 2000);
+            }
+        } catch (e) {
+            console.log('HCDC Auto Clicker: Failed to parse saved state:', e);
+        }
+    }
+
+    // Create and show extension status indicator
+    function createStatusIndicator() {
+        // Remove any existing indicator
+        const existing = document.getElementById('hcdc-extension-indicator');
+        if (existing) {
+            existing.remove();
+        }
+        
+        // Create status box
+        const statusBox = document.createElement('div');
+        statusBox.id = 'hcdc-extension-indicator';
+        statusBox.innerHTML = `
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <span style="color: #28a745; font-weight: bold;">●</span>
+                                 <span>HCDC Auto Clicker v2.2 - Extension Loaded</span>
+                <button id="hcdc-start-btn" style="
+                    background: #28a745; 
+                    color: white; 
+                    border: none; 
+                    padding: 4px 8px; 
+                    border-radius: 3px; 
+                    font-size: 11px;
+                    cursor: pointer;
+                ">Start Processing</button>
+                <button id="hcdc-stop-btn" style="
+                    background: #dc3545; 
+                    color: white; 
+                    border: none; 
+                    padding: 4px 8px; 
+                    border-radius: 3px; 
+                    font-size: 11px;
+                    cursor: pointer;
+                    display: none;
+                ">Stop Processing</button>
+                <button id="hcdc-test-btn" style="
+                    background: #007bff; 
+                    color: white; 
+                    border: none; 
+                    padding: 4px 8px; 
+                    border-radius: 3px; 
+                    font-size: 11px;
+                    cursor: pointer;
+                ">Test Links</button>
+                <span id="hcdc-status-text" style="font-size: 11px; color: #666;"></span>
+            </div>
+        `;
+        
+        // Style the status box
+        statusBox.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: linear-gradient(135deg, #e8f5e8, #f0f8f0);
+            border-bottom: 2px solid #28a745;
+            padding: 8px 16px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-size: 12px;
+            color: #333;
+            z-index: 10000;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            animation: slideDown 0.3s ease-out;
+        `;
+        
+        // Add CSS animation
+        if (!document.getElementById('hcdc-indicator-styles')) {
+            const style = document.createElement('style');
+            style.id = 'hcdc-indicator-styles';
+            style.textContent = `
+                @keyframes slideDown {
+                    from { transform: translateY(-100%); }
+                    to { transform: translateY(0); }
+                }
+                
+                #hcdc-extension-indicator button:hover {
+                    opacity: 0.8;
+                }
+                
+                #hcdc-extension-indicator button:active {
+                    transform: scale(0.95);
+                }
+            `;
+            document.head.appendChild(style);
+        }
+        
+        // Insert at the beginning of body
+        document.body.insertBefore(statusBox, document.body.firstChild);
+        
+        // Add button event listeners
+        const startBtn = document.getElementById('hcdc-start-btn');
+        const stopBtn = document.getElementById('hcdc-stop-btn');
+        const testBtn = document.getElementById('hcdc-test-btn');
+        const statusText = document.getElementById('hcdc-status-text');
+        
+        startBtn.addEventListener('click', () => {
+            console.log('Starting processing from status indicator...');
+            startProcessing();
+            startBtn.style.display = 'none';
+            stopBtn.style.display = 'inline-block';
+            statusText.textContent = 'Processing documents...';
+        });
+        
+        stopBtn.addEventListener('click', () => {
+            console.log('Stopping processing from status indicator...');
+            stopProcessing();
+            startBtn.style.display = 'inline-block';
+            stopBtn.style.display = 'none';
+            statusText.textContent = 'Processing stopped';
+        });
+        
+        testBtn.addEventListener('click', () => {
+            console.log('Testing links from status indicator...');
+            testLinks();
+            statusText.textContent = 'Link test completed - check console';
+        });
+        
+        // Update status if already running
+        if (isRunning) {
+            startBtn.style.display = 'none';
+            stopBtn.style.display = 'inline-block';
+            statusText.textContent = 'Processing documents...';
+        } else {
+            statusText.textContent = 'Ready to process documents';
+        }
+        
+        console.log('HCDC Auto Clicker status indicator displayed');
+    }
+    
+    // Show status indicator when page loads
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', createStatusIndicator);
+    } else {
+        createStatusIndicator();
+    }
+
+    // Ensure page bridge is loaded for ASP.NET postbacks
+    ensurePageBridge();
+
+    // Listen for messages from popup and background script
+    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+        console.log('DEBUG: Content script received message:', request);
+        
+        try {
+            switch (request.action) {
+                case 'getStatus':
+                    const hasNextPage = findNextPageButton() !== null;
+                    sendResponse({
+                        isRunning: isRunning,
+                        currentIndex: currentIndex,
+                        totalLinks: documentLinks.length,
+                        hasNextPage: hasNextPage,
+                        debugMode: debugMode,
+                        totalProcessed: totalProcessedCount,
+                        currentPage: currentPageNumber
+                    });
+                    return true;
+
+                case 'getCaseNumber':
+                    const caseNumber = getCaseNumber();
+                    sendResponse({
+                        caseNumber: caseNumber
+                    });
+                    return true;
+
+                case 'startAutoClick':
+                    debugMode = request.debugMode || false;
+                    console.log(`Starting auto-click processing (debug: ${debugMode})`);
+                    
+                    if (isRunning) {
+                        sendResponse({success: false, message: 'Already running'});
+                        return true;
+                    }
+                    
+                    const links = findDocumentLinks();
+                    if (links.length === 0) {
+                        sendResponse({success: false, message: 'No document links found'});
+                        return true;
+                    }
+                    
+                    startProcessing();
+                    sendResponse({
+                        success: true,
+                        count: links.length,
+                        message: `Started processing ${links.length} documents`
+                    });
+                    return true;
+
+                case 'stopAutoClick':
+                    console.log('Stopping auto-click processing');
+                    stopProcessing();
+                    sendResponse({
+                        success: true,
+                        message: 'Processing stopped'
+                    });
+                    return true;
+
+                case 'testLinks':
+                    const testLinks = findDocumentLinks();
+                    console.log(`Test: Found ${testLinks.length} document links`);
+                    testLinks.forEach((link, index) => {
+                        const docInfo = extractDocumentInfo(link);
+                        console.log(`${index + 1}: ${docInfo.number} - ${docInfo.title}`);
+                    });
+                    sendResponse({
+                        linksFound: testLinks.length,
+                        message: `Found ${testLinks.length} document links`
+                    });
+                    return true;
+
+                case 'setDelay':
+                    baseClickDelay = request.delay || 5000;
+                    console.log(`Updated delay to ${baseClickDelay}ms`);
+                    sendResponse({success: true});
+                    return true;
+
+                case 'pdfProcessingComplete':
+                    // Handle completion notification from background script
+                    console.log('PDF processing complete notification received');
+                    sendResponse({success: true});
+                    return true;
+
+                default:
+                    console.log('Unknown action:', request.action);
+                    sendResponse({success: false, message: 'Unknown action'});
+                    return true;
+            }
+        } catch (error) {
+            console.error('Error handling message:', error);
+            sendResponse({success: false, message: error.message});
+            return true;
+        }
+    });
+})();

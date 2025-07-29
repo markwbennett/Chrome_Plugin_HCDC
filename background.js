@@ -11,8 +11,7 @@ let sessionDownloads = new Set();
 // Track the current PDF tab to ensure only one is open at a time
 let currentPDFTabId = null;
 
-// Store response callbacks for tabs waiting for download completion
-let tabResponseCallbacks = {};
+// Store response callbacks for tabs waiting for download completion (removed - now respond immediately)
 
 // Store document information for each tab
 let tabDocumentInfo = {};
@@ -82,14 +81,10 @@ chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
         currentPDFTabId = null;
     }
     
-    // Clean up stored document info and callbacks
+    // Clean up stored document info
     if (tabDocumentInfo[tabId]) {
         console.log('DEBUG: Cleaning up document info for tab:', tabId);
         delete tabDocumentInfo[tabId];
-    }
-    if (tabResponseCallbacks[tabId]) {
-        console.log('DEBUG: Cleaning up callback for tab:', tabId);
-        delete tabResponseCallbacks[tabId];
     }
     
     // Clean up plugin-initiated tab tracking
@@ -114,7 +109,14 @@ function closeCurrentPDFTab() {
     });
 }
 
-// Function to extract PDF URL from ViewFilePage (injected into tab)
+/**
+ * Extracts the direct PDF URL from the District Clerk ViewFilePage and triggers a download.
+ * Executed as an injected script inside the newly opened viewer tab.
+ * After locating the PDF resource, the function messages the background script with
+ * action 'downloadPDF' and closes the tab.
+ *
+ * @param {number} tabId - Identifier of the tab where extraction occurs.
+ */
 function extractPDFUrl(tabId) {
     const extractStartTime = Date.now();
     console.log(`DEBUG [${new Date().toISOString()}]: Starting PDF extraction from ViewFilePage`);
@@ -400,20 +402,50 @@ function extractPDFUrl(tabId) {
 }
 
 // Function to check if file already exists
-async function checkExistingFiles(filename) {
+async function checkExistingFiles(filename, docNumber = null) {
     return new Promise((resolve) => {
-        chrome.downloads.search({
-            filename: filename,
-            state: 'complete'
-        }, (results) => {
-            console.log(`DEBUG [${new Date().toISOString()}]: Checked for existing file "${filename}":`, results.length, 'matches');
-            resolve(results);
-        });
+        // If we have a document number, check for any files starting with that 9-digit number
+        if (docNumber && docNumber.length >= 9) {
+            const searchPattern = docNumber.substring(0, 9);
+            console.log(`DEBUG [${new Date().toISOString()}]: Checking for existing files with document number: ${searchPattern}`);
+            
+            // Search all completed downloads and filter by document number pattern
+            chrome.downloads.search({
+                state: 'complete'
+            }, (allResults) => {
+                const matchingFiles = allResults.filter(result => {
+                    if (!result.filename) return false;
+                    
+                    // Extract just the filename from the full path
+                    const fileName = result.filename.split('/').pop() || result.filename;
+                    
+                    // Check if filename starts with the 9-digit document number
+                    const fileStartsWith9Digits = fileName.match(/^(\d{9})/);
+                    if (fileStartsWith9Digits && fileStartsWith9Digits[1] === searchPattern) {
+                        console.log(`DEBUG [${new Date().toISOString()}]: Found existing file with same document number: ${fileName}`);
+                        return true;
+                    }
+                    return false;
+                });
+                
+                console.log(`DEBUG [${new Date().toISOString()}]: Found ${matchingFiles.length} existing files with document number ${searchPattern}`);
+                resolve(matchingFiles);
+            });
+        } else {
+            // Fallback to exact filename check
+            chrome.downloads.search({
+                filename: filename,
+                state: 'complete'
+            }, (results) => {
+                console.log(`DEBUG [${new Date().toISOString()}]: Checked for existing file "${filename}":`, results.length, 'matches');
+                resolve(results);
+            });
+        }
     });
 }
 
 // Listen for download events to ensure proper file naming and location
-chrome.downloads.onDeterminingFilename.addListener(async (downloadItem, suggest) => {
+chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
     console.log(`DEBUG [${new Date().toISOString()}]: onDeterminingFilename called for:`, downloadItem.url);
     
     // Check if this is from the District Clerk site
@@ -452,121 +484,43 @@ chrome.downloads.onDeterminingFilename.addListener(async (downloadItem, suggest)
             // Format: {caseNumber}/{number} {title}.pdf
             filename = `${currentCaseNumber}/${docInfo.number} ${sanitizedTitle}.pdf`;
             console.log('DEBUG: Using document-based filename:', filename);
-            console.log('DEBUG: Components - case:', currentCaseNumber, 'number:', docInfo.number, 'title:', sanitizedTitle);
         } else {
-            // Fallback to timestamp-based naming
-            const timestamp = Date.now();
-            filename = `${currentCaseNumber}/hcdc_document_${timestamp}.pdf`;
-            console.log('DEBUG: Using timestamp-based filename:', filename);
-            console.log('DEBUG: Fallback reason - docInfo:', docInfo);
-            console.log('DEBUG: Fallback validation failed for:', {
-                hasDocInfo: !!docInfo,
-                hasNumber: docInfo?.number,
-                numberNotUnknown: docInfo?.number !== 'unknown',
-                hasTitle: docInfo?.title,
-                titleNotDocument: docInfo?.title !== 'document'
-            });
+            // Fallback
+            if (docInfo && docInfo.number && docInfo.number !== 'unknown') {
+                filename = `${currentCaseNumber}/${docInfo.number} Document.pdf`;
+            } else {
+                filename = `${currentCaseNumber}/hcdc_document_${Date.now()}.pdf`;
+            }
+            console.log('DEBUG: Using fallback filename:', filename);
         }
         
-        // Check for duplicates in current session first
+        // Suggest filename immediately (must be synchronous)
+        try {
+            suggest({ filename: filename, conflictAction: 'uniquify' });
+        } catch (e) {
+            console.error('ERROR suggesting filename:', e);
+        }
+        
+        // ---- Duplicate checks run asynchronously so we don't block suggest ----
         const sessionKey = generateSessionKey(currentCaseNumber, docInfo?.number || 'unknown', docInfo?.title || 'document');
-        console.log(`DEBUG [${new Date().toISOString()}]: Checking session key:`, sessionKey);
-        console.log(`DEBUG [${new Date().toISOString()}]: Current session downloads:`, Array.from(sessionDownloads));
+        console.log(`DEBUG [${new Date().toISOString()}]: Async duplicate check. Key:`, sessionKey);
         
         if (sessionDownloads.has(sessionKey)) {
-            console.log(`DEBUG [${new Date().toISOString()}]: Document already downloaded in this session, cancelling:`, filename);
-            
-            // Cancel the download
-            suggest({
-                filename: filename,
-                conflictAction: 'overwrite' // This will be cancelled anyway
-            });
-            
-            // Cancel the download immediately
-            setTimeout(() => {
-                chrome.downloads.cancel(downloadItem.id, () => {
-                    console.log(`DEBUG [${new Date().toISOString()}]: Download cancelled for duplicate in session:`, filename);
-                    
-                    // Notify content script that download was skipped
-                    if (currentPDFTabId && tabResponseCallbacks[currentPDFTabId]) {
-                        const callback = tabResponseCallbacks[currentPDFTabId];
-                        callback({
-                            success: true, 
-                            tabId: currentPDFTabId, 
-                            downloadSuccess: false, 
-                            skipped: true,
-                            reason: 'Already downloaded in this session',
-                            filename: filename
-                        });
-                        delete tabResponseCallbacks[currentPDFTabId];
-                    }
-                    
-                    // Close the PDF tab
-                    if (currentPDFTabId) {
-                        chrome.tabs.remove(currentPDFTabId);
-                        currentPDFTabId = null;
-                    }
-                });
-            }, 100);
-            
+            console.log('Duplicate in session detected. Cancelling download:', filename);
+            chrome.downloads.cancel(downloadItem.id);
             return;
         }
         
-        // Also check if file already exists on disk
-        console.log(`DEBUG [${new Date().toISOString()}]: Checking if file already exists on disk:`, filename);
-        const existingFiles = await checkExistingFiles(filename);
-        if (existingFiles.length > 0) {
-            console.log(`DEBUG [${new Date().toISOString()}]: File already exists on disk, cancelling download:`, filename);
-            
-            // Add to session downloads to prevent future attempts
-            sessionDownloads.add(sessionKey);
-            
-            // Cancel the download
-            suggest({
-                filename: filename,
-                conflictAction: 'overwrite' // This will be cancelled anyway
-            });
-            
-            // Cancel the download immediately
-            setTimeout(() => {
-                chrome.downloads.cancel(downloadItem.id, () => {
-                    console.log(`DEBUG [${new Date().toISOString()}]: Download cancelled for existing file:`, filename);
-                    
-                    // Notify content script that download was skipped
-                    if (currentPDFTabId && tabResponseCallbacks[currentPDFTabId]) {
-                        const callback = tabResponseCallbacks[currentPDFTabId];
-                        callback({
-                            success: true, 
-                            tabId: currentPDFTabId, 
-                            downloadSuccess: false, 
-                            skipped: true,
-                            reason: 'File already exists',
-                            filename: filename
-                        });
-                        delete tabResponseCallbacks[currentPDFTabId];
-                    }
-                    
-                    // Close the PDF tab
-                    if (currentPDFTabId) {
-                        chrome.tabs.remove(currentPDFTabId);
-                        currentPDFTabId = null;
-                    }
-                });
-            }, 100);
-            
-            return;
-        }
-        
-        // Add to session downloads to track this download
-        sessionDownloads.add(sessionKey);
-        console.log(`DEBUG [${new Date().toISOString()}]: Added to session downloads:`, sessionKey);
-        
-        console.log('Setting download filename:', filename);
-        
-        // Use the suggest callback to set the filename and handle conflicts
-        suggest({
-            filename: filename,
-            conflictAction: 'uniquify'
+        checkExistingFiles(filename, docInfo?.number).then(existingFiles => {
+            if (existingFiles.length > 0) {
+                console.log('Document already exists on disk (by 9-digit number). Cancelling download:', filename);
+                console.log('Existing files found:', existingFiles.map(f => f.filename));
+                sessionDownloads.add(sessionKey);
+                chrome.downloads.cancel(downloadItem.id);
+            } else {
+                sessionDownloads.add(sessionKey);
+                console.log('Filename set and no duplicates found. Proceeding with download.');
+            }
         });
     }
 });
@@ -700,7 +654,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         console.log(`DEBUG [${new Date().toISOString()}]: Request URL:`, request.url?.substring(0, 100) + '...');
         console.log(`DEBUG [${new Date().toISOString()}]: Document info:`, request.documentNumber, request.documentTitle);
         console.log(`DEBUG [${new Date().toISOString()}]: Case number:`, request.caseNumber);
-        console.log(`DEBUG [${new Date().toISOString()}]: Full request:`, request);
         
         // Validate URL
         if (!request.url || !request.url.startsWith('http')) {
@@ -711,39 +664,29 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         
         // Close current PDF tab first, then open new one (one tab at a time)
         console.log(`DEBUG [${new Date().toISOString()}]: Closing current PDF tab (if any)...`);
-        const closeStartTime = Date.now();
         
         closeCurrentPDFTab().then(() => {
-            const closeEndTime = Date.now();
-            const closeDuration = closeEndTime - closeStartTime;
-            console.log(`DEBUG [${new Date().toISOString()}]: Current PDF tab closed (took ${closeDuration}ms), creating new tab...`);
+            console.log(`DEBUG [${new Date().toISOString()}]: Current PDF tab closed, creating new tab...`);
             
-            const createStartTime = Date.now();
             chrome.tabs.create({
                 url: request.url,
                 active: false
             }).then(tab => {
-                const createEndTime = Date.now();
-                const createDuration = createEndTime - createStartTime;
-                const totalDuration = createEndTime - requestStartTime;
-                
                 currentPDFTabId = tab.id;
-                console.log(`DEBUG [${new Date().toISOString()}]: Successfully opened new PDF tab: ${tab.id} (create: ${createDuration}ms, total: ${totalDuration}ms)`);
+                console.log(`DEBUG [${new Date().toISOString()}]: Successfully opened new PDF tab: ${tab.id}`);
                 
                 // Mark this tab as plugin-initiated
                 pluginInitiatedTabs.add(tab.id);
                 console.log(`DEBUG [${new Date().toISOString()}]: Marked tab as plugin-initiated: ${tab.id}`);
                 
-                // Store the response callback for this tab
-                tabResponseCallbacks[tab.id] = sendResponse;
-                
                 // Store document information for this tab
                 tabDocumentInfo[tab.id] = {
                     number: request.documentNumber || 'unknown',
-                    title: request.documentTitle || 'document'
+                    title: request.documentTitle || 'document',
+                    callback: sendResponse, // Store the callback to respond when download completes
+                    requestTime: requestStartTime
                 };
                 console.log(`DEBUG [${new Date().toISOString()}]: Stored document info for tab ${tab.id}:`, tabDocumentInfo[tab.id]);
-                console.log(`DEBUG [${new Date().toISOString()}]: All stored tab document info:`, tabDocumentInfo);
                 
                 // Update case number if provided
                 if (request.caseNumber && request.caseNumber !== currentCaseNumber) {
@@ -751,27 +694,56 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     currentCaseNumber = request.caseNumber;
                 }
                 
-                // Set timeout in case download never completes
+                // Don't respond immediately - wait for PDF processing to complete
+                console.log(`DEBUG [${new Date().toISOString()}]: Waiting for PDF processing to complete for tab ${tab.id}...`);
+                
+                // Set a timeout to respond if PDF processing takes too long
                 setTimeout(() => {
-                    if (tabResponseCallbacks[tab.id]) {
-                        console.log(`DEBUG [${new Date().toISOString()}]: Timeout waiting for download completion for tab: ${tab.id} (after 30s)`);
-                        const callback = tabResponseCallbacks[tab.id];
-                        callback({success: true, tabId: tab.id, downloadSuccess: false, error: 'Download timeout'});
-                        delete tabResponseCallbacks[tab.id];
+                    const docInfo = tabDocumentInfo[tab.id];
+                    if (docInfo && docInfo.callback) {
+                        console.log(`DEBUG [${new Date().toISOString()}]: PDF processing timeout for tab ${tab.id}, responding anyway`);
+                        docInfo.callback({
+                            success: false,
+                            tabId: tab.id,
+                            downloadSuccess: false,
+                            error: 'Processing timeout',
+                            processingTime: Date.now() - docInfo.requestTime
+                        });
+                        delete tabDocumentInfo[tab.id];
                     }
                 }, 30000); // 30 second timeout
                 
             }).catch(error => {
-                const createEndTime = Date.now();
-                const createDuration = createEndTime - createStartTime;
-                console.log(`DEBUG [${new Date().toISOString()}]: Failed to create PDF tab (after ${createDuration}ms):`, error);
+                console.log(`DEBUG [${new Date().toISOString()}]: Failed to create PDF tab:`, error);
                 sendResponse({success: false, error: error.message});
             });
         }).catch(error => {
-            const closeEndTime = Date.now();
-            const closeDuration = closeEndTime - closeStartTime;
-            console.log(`DEBUG [${new Date().toISOString()}]: Failed to close current PDF tab (after ${closeDuration}ms):`, error);
+            console.log(`DEBUG [${new Date().toISOString()}]: Failed to close current PDF tab:`, error);
             sendResponse({success: false, error: error.message});
+        });
+        
+        return true; // Keep message channel open for async response
+    } else if (request.action === 'checkDocumentExists') {
+        console.log(`DEBUG [${new Date().toISOString()}]: Checking if document exists:`, request.documentNumber);
+        
+        // Validate document number
+        if (!request.documentNumber || request.documentNumber.length < 9) {
+            console.log(`DEBUG [${new Date().toISOString()}]: Invalid document number for check:`, request.documentNumber);
+            sendResponse({exists: false, error: 'Invalid document number'});
+            return true;
+        }
+        
+        // Use the enhanced checkExistingFiles function
+        checkExistingFiles(null, request.documentNumber).then(existingFiles => {
+            const exists = existingFiles.length > 0;
+            console.log(`DEBUG [${new Date().toISOString()}]: Document ${request.documentNumber} exists:`, exists);
+            if (exists) {
+                console.log(`DEBUG [${new Date().toISOString()}]: Existing files:`, existingFiles.map(f => f.filename));
+            }
+            sendResponse({exists: exists, existingFiles: existingFiles.map(f => f.filename)});
+        }).catch(error => {
+            console.log(`DEBUG [${new Date().toISOString()}]: Error checking document existence:`, error);
+            sendResponse({exists: false, error: error.message});
         });
         
         return true; // Keep message channel open for async response
@@ -783,19 +755,26 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             error: request.error
         });
         
-        // Check if we have a callback waiting for this tab
-        if (tabResponseCallbacks[request.tabId]) {
-            console.log(`DEBUG [${new Date().toISOString()}]: Calling stored callback for tab: ${request.tabId}`);
-            const callback = tabResponseCallbacks[request.tabId];
-            callback({
-                success: true, 
-                tabId: request.tabId, 
-                downloadSuccess: request.success, 
-                downloadId: request.downloadId
+        // Find the stored callback for this tab and respond to the original content script request
+        const docInfo = tabDocumentInfo[request.tabId];
+        if (docInfo && docInfo.callback) {
+            console.log(`DEBUG [${new Date().toISOString()}]: Calling stored callback for tab ${request.tabId}`);
+            const processingTime = Date.now() - docInfo.requestTime;
+            console.log(`DEBUG [${new Date().toISOString()}]: Processing took ${processingTime}ms`);
+            
+            docInfo.callback({
+                success: true,
+                tabId: request.tabId,
+                downloadSuccess: request.success,
+                downloadId: request.downloadId,
+                error: request.error,
+                processingTime: processingTime
             });
             
-            // Clean up the callback
-            delete tabResponseCallbacks[request.tabId];
+            // Clean up the stored callback
+            delete tabDocumentInfo[request.tabId];
+        } else {
+            console.log(`DEBUG [${new Date().toISOString()}]: No callback found for tab ${request.tabId}`);
         }
         
         sendResponse({success: true});
