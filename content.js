@@ -477,84 +477,70 @@
 
             console.log(`Processing document ${docInfo.number}: ${docInfo.title}`);
 
-            // Check if document already exists before opening PDF tab
-            console.log(`DEBUG: Checking if document ${docInfo.number} already exists...`);
-            chrome.runtime.sendMessage({
-                action: 'checkDocumentExists',
-                documentNumber: docInfo.number
-            }, (existsResponse) => {
-                if (chrome.runtime.lastError) {
-                    console.log(`DEBUG: Chrome runtime error checking document existence:`, chrome.runtime.lastError);
-                    // Continue with processing if check fails
-                } else if (existsResponse && existsResponse.exists) {
-                    console.log(`Document ${docInfo.number} already exists, skipping download:`, existsResponse.existingFiles);
-                    callback(true, false); // Skipped - already exists on disk
+            // Proceed with download - let Chrome handle duplicates via conflictAction: 'uniquify'
+            // Note: We removed the checkDocumentExists pre-check because chrome.downloads.search
+            // searches download HISTORY, not actual files on disk, causing false positives
+            console.log(`Processing document ${docInfo.number}, opening URL: ${fullUrl.substring(0, 100)}...`);
+
+            // Check rate limiting before processing
+            function attemptDocumentProcessing() {
+                if (!canMakeRequest()) {
+                    const waitTime = getTimeUntilNextRequest();
+                    console.log(`Rate limit reached, waiting ${Math.ceil(waitTime/1000)}s before processing document ${docInfo.number}`);
+                    setTimeout(attemptDocumentProcessing, waitTime + 1000); // Add 1s buffer
                     return;
                 }
-                
-                console.log(`Document ${docInfo.number} not found locally, proceeding with download...`);
-                console.log(`Opening URL: ${fullUrl.substring(0, 100)}...`);
 
-                // Check rate limiting before processing
-                function attemptDocumentProcessing() {
-                    if (!canMakeRequest()) {
-                        const waitTime = getTimeUntilNextRequest();
-                        console.log(`Rate limit reached, waiting ${Math.ceil(waitTime/1000)}s before processing document ${docInfo.number}`);
-                        setTimeout(attemptDocumentProcessing, waitTime + 1000); // Add 1s buffer
+                recordRequest(); // Record this request
+
+                console.log(`DEBUG: Starting document processing after rate limit check`);
+                console.log(`DEBUG: Document info being processed:`, {
+                    number: docInfo.number,
+                    title: docInfo.title,
+                    caseNumber: caseNumber,
+                    url: fullUrl.substring(0, 100) + '...'
+                });
+
+                // Send message to background script to open PDF tab
+                console.log(`DEBUG: Sending message to background with:`, {
+                    action: 'openPDFTabWithCallback',
+                    url: fullUrl,
+                    documentNumber: docInfo.number,
+                    documentTitle: docInfo.title,
+                    caseNumber: caseNumber
+                });
+
+                chrome.runtime.sendMessage({
+                    action: 'openPDFTabWithCallback',
+                    url: fullUrl,
+                    documentNumber: docInfo.number,
+                    documentTitle: docInfo.title,
+                    caseNumber: caseNumber
+                }, (response) => {
+                    console.log(`DEBUG: Received response for document ${docInfo.number}:`, response);
+
+                    if (chrome.runtime.lastError) {
+                        console.log(`DEBUG: Chrome runtime error:`, chrome.runtime.lastError);
+                        callback(false, false);
                         return;
                     }
-                    
-                    recordRequest(); // Record this request
-                    
-                    console.log(`DEBUG: Starting document processing after rate limit check`);
-                    console.log(`DEBUG: Document info being processed:`, {
-                        number: docInfo.number,
-                        title: docInfo.title,
-                        caseNumber: caseNumber,
-                        url: fullUrl.substring(0, 100) + '...'
-                    });
-                    
-                    // Send message to background script to open PDF tab
-                    console.log(`DEBUG: Sending message to background with:`, {
-                        action: 'openPDFTabWithCallback',
-                        url: fullUrl,
-                        documentNumber: docInfo.number,
-                        documentTitle: docInfo.title,
-                        caseNumber: caseNumber
-                    });
-                    
-                    chrome.runtime.sendMessage({
-                        action: 'openPDFTabWithCallback',
-                        url: fullUrl,
-                        documentNumber: docInfo.number,
-                        documentTitle: docInfo.title,
-                        caseNumber: caseNumber
-                    }, (response) => {
-                        console.log(`DEBUG: Received response for document ${docInfo.number}:`, response);
-                        
-                        if (chrome.runtime.lastError) {
-                            console.log(`DEBUG: Chrome runtime error:`, chrome.runtime.lastError);
-                            callback(false, false);
-                            return;
-                        }
 
-                        if (response && response.success) {
-                            console.log(`Successfully processed document ${docInfo.number}: ${response.downloadSuccess ? 'Downloaded' : 'Skipped'}`);
-                            if (response.skipped) {
-                                console.log(`Document skipped: ${response.reason}`);
-                            }
-                            // Pass whether download actually happened
-                            callback(true, response.downloadSuccess === true);
-                        } else {
-                            console.log(`Failed to process document ${docInfo.number}: ${response?.error || 'Unknown error'}`);
-                            callback(false, false);
+                    if (response && response.success) {
+                        console.log(`Successfully processed document ${docInfo.number}: ${response.downloadSuccess ? 'Downloaded' : 'Skipped'}`);
+                        if (response.skipped) {
+                            console.log(`Document skipped: ${response.reason}`);
                         }
-                    });
-                }
-                
-                // Add humanlike pause before attempting processing
-                setTimeout(attemptDocumentProcessing, getHumanlikeDelay());
-            });
+                        // Pass whether download actually happened
+                        callback(true, response.downloadSuccess === true);
+                    } else {
+                        console.log(`Failed to process document ${docInfo.number}: ${response?.error || 'Unknown error'}`);
+                        callback(false, false);
+                    }
+                });
+            }
+
+            // Add humanlike pause before attempting processing
+            setTimeout(attemptDocumentProcessing, getHumanlikeDelay());
         } catch (error) {
             console.error('Error processing document:', error);
             callback(false, false);
