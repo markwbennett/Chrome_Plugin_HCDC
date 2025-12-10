@@ -165,7 +165,7 @@ function extractPDFUrl(tabId) {
         // Close this tab after download
         setTimeout(() => {
             window.close();
-        }, 2000);
+        }, 500);
         return;
     }
     
@@ -237,7 +237,7 @@ function extractPDFUrl(tabId) {
                     });
                 });
                 // Close this wrapper tab
-                setTimeout(() => window.close(), 1500);
+                setTimeout(() => window.close(), 300);
                 return iframe.src;
             }
             if (iframe.src && (iframe.src.includes('.pdf') || iframe.src.includes('GetFile'))) {
@@ -254,7 +254,7 @@ function extractPDFUrl(tabId) {
                         downloadId: response?.downloadId
                     });
                 });
-                setTimeout(() => window.close(), 1500);
+                setTimeout(() => window.close(), 300);
                 return iframe.src;
             }
         }
@@ -286,7 +286,7 @@ function extractPDFUrl(tabId) {
                         downloadId: response?.downloadId
                     });
                 });
-                setTimeout(() => window.close(), 1500);
+                setTimeout(() => window.close(), 300);
                 return embed.src;
             }
         }
@@ -318,7 +318,7 @@ function extractPDFUrl(tabId) {
                         downloadId: response?.downloadId
                     });
                 });
-                setTimeout(() => window.close(), 1500);
+                setTimeout(() => window.close(), 300);
                 return obj.data;
             }
         }
@@ -341,7 +341,7 @@ function extractPDFUrl(tabId) {
                     downloadId: response?.downloadId
                 });
             });
-            setTimeout(() => window.close(), 1500);
+            setTimeout(() => window.close(), 300);
             return links[0].href;
         }
         
@@ -365,7 +365,7 @@ function extractPDFUrl(tabId) {
                     downloadId: response?.downloadId
                 });
             });
-            setTimeout(() => window.close(), 1500);
+            setTimeout(() => window.close(), 300);
             return pdfUrlMatch[0];
         }
         
@@ -391,8 +391,8 @@ function extractPDFUrl(tabId) {
             console.log('Found PDF URL:', pdfUrl);
             return; // Success - message already sent to background
         } else if (attempts < maxAttempts) {
-            console.log(`No PDF found on attempt ${attempts}, retrying in 2 seconds...`);
-            setTimeout(waitAndExtract, 2000);
+            console.log(`No PDF found on attempt ${attempts}, retrying in 500ms...`);
+            setTimeout(waitAndExtract, 500);
         } else {
             console.log('Failed to find PDF after all attempts');
             console.log('Page HTML preview:', document.body.innerHTML.substring(0, 1000));
@@ -406,12 +406,12 @@ function extractPDFUrl(tabId) {
             });
             
             // Still close the tab even if we couldn't find the PDF
-            setTimeout(() => window.close(), 1000);
+            setTimeout(() => window.close(), 300);
         }
     }
     
-    // Start with initial delay to allow page to load
-    setTimeout(waitAndExtract, 3000);
+    // Start with brief delay to allow page to load
+    setTimeout(waitAndExtract, 500);
 }
 
 // Function to check if file already exists
@@ -514,27 +514,21 @@ chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
             console.error('ERROR suggesting filename:', e);
         }
         
-        // ---- Duplicate checks run asynchronously so we don't block suggest ----
+        // Track this download in session to prevent duplicates within same session
         const sessionKey = generateSessionKey(currentCaseNumber, docInfo?.number || 'unknown', docInfo?.title || 'document');
-        console.log(`DEBUG [${new Date().toISOString()}]: Async duplicate check. Key:`, sessionKey);
-        
+        console.log(`DEBUG [${new Date().toISOString()}]: Session key: ${sessionKey}`);
+
         if (sessionDownloads.has(sessionKey)) {
             console.log('Duplicate in session detected. Cancelling download:', filename);
             chrome.downloads.cancel(downloadItem.id);
             return;
         }
-        
-        checkExistingFiles(filename, docInfo?.number).then(existingFiles => {
-            if (existingFiles.length > 0) {
-                console.log('Document already exists on disk (by 9-digit number). Cancelling download:', filename);
-                console.log('Existing files found:', existingFiles.map(f => f.filename));
-                sessionDownloads.add(sessionKey);
-                chrome.downloads.cancel(downloadItem.id);
-            } else {
-                sessionDownloads.add(sessionKey);
-                console.log('Filename set and no duplicates found. Proceeding with download.');
-            }
-        });
+
+        // Add to session downloads and proceed
+        // Note: Removed checkExistingFiles - it checks download HISTORY not actual files
+        // Chrome's conflictAction: 'uniquify' handles actual file duplicates
+        sessionDownloads.add(sessionKey);
+        console.log('Proceeding with download:', filename);
     }
 });
 

@@ -126,10 +126,10 @@
         return randomDelay;
     }
 
-    // Function to generate humanlike random pauses (3-7 seconds, increased from 1-3)
+    // Function to generate humanlike random pauses (0.5-1.5 seconds)
     function getHumanlikeDelay() {
-        const minDelay = 3000; // 3 seconds
-        const maxDelay = 7000; // 7 seconds
+        const minDelay = 500; // 0.5 seconds
+        const maxDelay = 1500; // 1.5 seconds
         const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
         console.log(`Humanlike delay: ${randomDelay}ms (range: ${minDelay}-${maxDelay}ms)`);
         return randomDelay;
