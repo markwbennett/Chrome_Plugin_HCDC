@@ -36,6 +36,36 @@
     let lastPageChangeTime = 0;
 
     let cachedNextButton = null;
+    let downloadedCount = 0; // Track successful downloads
+    let skippedCount = 0; // Track skipped/failed downloads
+
+    // Function to update progress bar in status indicator
+    function updateProgressBar(completed, total, downloaded, skipped) {
+        const progressContainer = document.getElementById('hcdc-progress-container');
+        const progressBar = document.getElementById('hcdc-progress-bar');
+        const progressText = document.getElementById('hcdc-progress-text');
+        const docCount = document.getElementById('hcdc-doc-count');
+
+        if (progressContainer && progressBar && progressText) {
+            progressContainer.style.display = 'block';
+            const percentage = total > 0 ? (completed / total) * 100 : 0;
+            progressBar.style.width = percentage + '%';
+
+            // Show downloaded and skipped counts
+            let statusParts = [`${completed}/${total}`];
+            if (downloaded > 0) statusParts.push(`${downloaded} downloaded`);
+            if (skipped > 0) statusParts.push(`${skipped} skipped`);
+            progressText.textContent = statusParts.join(' | ');
+
+            // Update doc count badge to show progress
+            if (docCount) {
+                docCount.textContent = `${completed}/${total} processed`;
+                if (completed === total && total > 0) {
+                    docCount.style.background = '#28a745'; // Green when complete
+                }
+            }
+        }
+    }
 
     // Restore running state after page navigation
     const persisted = (() => {
@@ -397,17 +427,18 @@
     }
 
     // Function to process a single document
+    // callback(success, wasDownloaded) - wasDownloaded is true only if file was actually downloaded
     function processDocument(link, callback) {
         if (!link.href || !link.href.startsWith('javascript:')) {
-            callback(false);
+            callback(false, false);
             return;
         }
 
         const jsCode = link.href.substring(11);
         const match = jsCode.match(/(\w+)\((.*)\)/s);
-        
+
         if (!match) {
-            callback(false);
+            callback(false, false);
             return;
         }
 
@@ -416,7 +447,7 @@
             const paramArray = parseJavaScriptParams(params);
             
             if (paramArray.length < 1) {
-                callback(false);
+                callback(false, false);
                 return;
             }
 
@@ -437,7 +468,7 @@
                 console.log(`Skipping duplicate document: ${docInfo.number} - ${docInfo.title}`);
                 console.log(`DEBUG: Session key found in processedDocuments:`, sessionKey);
                 console.log(`DEBUG: All processed documents:`, Array.from(processedDocuments));
-                callback(true); // Return true so it's considered "processed successfully"
+                callback(true, false); // Skipped - already processed this session
                 return;
             }
             
@@ -457,7 +488,7 @@
                     // Continue with processing if check fails
                 } else if (existsResponse && existsResponse.exists) {
                     console.log(`Document ${docInfo.number} already exists, skipping download:`, existsResponse.existingFiles);
-                    callback(true); // Return true so it's considered "processed successfully"
+                    callback(true, false); // Skipped - already exists on disk
                     return;
                 }
                 
@@ -503,19 +534,20 @@
                         
                         if (chrome.runtime.lastError) {
                             console.log(`DEBUG: Chrome runtime error:`, chrome.runtime.lastError);
-                            callback(false);
+                            callback(false, false);
                             return;
                         }
-                        
+
                         if (response && response.success) {
                             console.log(`Successfully processed document ${docInfo.number}: ${response.downloadSuccess ? 'Downloaded' : 'Skipped'}`);
                             if (response.skipped) {
                                 console.log(`Document skipped: ${response.reason}`);
                             }
-                            callback(response.downloadSuccess || response.skipped);
+                            // Pass whether download actually happened
+                            callback(true, response.downloadSuccess === true);
                         } else {
                             console.log(`Failed to process document ${docInfo.number}: ${response?.error || 'Unknown error'}`);
-                            callback(false);
+                            callback(false, false);
                         }
                     });
                 }
@@ -525,7 +557,7 @@
             });
         } catch (error) {
             console.error('Error processing document:', error);
-            callback(false);
+            callback(false, false);
         }
     }
 
@@ -549,21 +581,31 @@
         console.log(`DEBUG: Document ${docIndex} info:`, docInfo);
         console.log(`DEBUG: Document ${docIndex} link:`, link.href.substring(0, 100) + '...');
 
-        processDocument(link, (success) => {
+        processDocument(link, (success, wasDownloaded) => {
             activeDownloads--;
-            
+            totalProcessedCount++;
+
             if (success) {
-                totalProcessedCount++;
-                console.log(`Document ${docIndex} processed successfully`);
+                if (wasDownloaded) {
+                    downloadedCount++;
+                    console.log(`Document ${docIndex} downloaded successfully`);
+                } else {
+                    skippedCount++;
+                    console.log(`Document ${docIndex} skipped (already exists or failed)`);
+                }
             } else {
+                skippedCount++;
                 console.log(`Document ${docIndex} failed to process`);
             }
+
+            // Update progress bar
+            updateProgressBar(totalProcessedCount, documentLinks.length, downloadedCount, skippedCount);
 
             // Process next document sequentially to maintain rate limiting
             if (isRunning && currentIndex < documentLinks.length && activeDownloads < 1) {
                 processNextDocument();
             }
-            
+
             // Check for next page when all documents are processed
             if (isRunning && currentIndex >= documentLinks.length && activeDownloads === 0) {
                 console.log(`All documents on current page processed (${totalProcessedCount} total). Checking for next page...`);
@@ -746,14 +788,16 @@
     // Function to start processing
     function startProcessing() {
         if (isRunning) return;
-        
+
         isRunning = true;
         totalProcessedCount = 0;
+        downloadedCount = 0; // Reset download counter
+        skippedCount = 0; // Reset skipped counter
         currentPageNumber = 1;
         pageProcessingStartTime = Date.now();
         emergencyStopTriggered = false;
         processingDocument = false; // Initialize processing flag
-        
+
         console.log('HCDC Auto Clicker: Starting document processing...');
         
         // Get case number for folder naming
@@ -812,10 +856,21 @@
         const startBtn = document.getElementById('hcdc-start-btn');
         const stopBtn = document.getElementById('hcdc-stop-btn');
         const statusText = document.getElementById('hcdc-status-text');
+        const docCount = document.getElementById('hcdc-doc-count');
         if (startBtn && stopBtn && statusText) {
             startBtn.style.display = 'inline-block';
             stopBtn.style.display = 'none';
-            statusText.textContent = `Processing stopped (${totalProcessedCount} documents processed)`;
+            // Show final stats with downloaded and skipped counts
+            let finalStatus = `Done: ${downloadedCount} downloaded`;
+            if (skippedCount > 0) {
+                finalStatus += `, ${skippedCount} skipped`;
+            }
+            statusText.textContent = finalStatus;
+            // Update doc count badge
+            if (docCount) {
+                docCount.textContent = `${totalProcessedCount} processed`;
+                docCount.style.background = '#28a745'; // Green when complete
+            }
         }
 
         // Clear persisted state
@@ -863,43 +918,56 @@
         if (existing) {
             existing.remove();
         }
-        
+
+        // Count documents on page
+        const initialLinks = document.querySelectorAll('a.dcoLink[href*="OpenImageViewerConf"]');
+        const docCount = initialLinks.length;
+
         // Create status box
         const statusBox = document.createElement('div');
         statusBox.id = 'hcdc-extension-indicator';
         statusBox.innerHTML = `
-            <div style="display: flex; align-items: center; gap: 10px;">
+            <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
                 <span style="color: #28a745; font-weight: bold;">●</span>
-                                 <span>HCDC Auto Clicker v2.2 - Extension Loaded</span>
+                <span>HCDC Auto Clicker v2.2</span>
+                <span id="hcdc-doc-count" style="background: #007bff; color: white; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: bold;">${docCount} documents</span>
                 <button id="hcdc-start-btn" style="
-                    background: #28a745; 
-                    color: white; 
-                    border: none; 
-                    padding: 4px 8px; 
-                    border-radius: 3px; 
+                    background: #28a745;
+                    color: white;
+                    border: none;
+                    padding: 4px 8px;
+                    border-radius: 3px;
                     font-size: 11px;
                     cursor: pointer;
                 ">Start Processing</button>
                 <button id="hcdc-stop-btn" style="
-                    background: #dc3545; 
-                    color: white; 
-                    border: none; 
-                    padding: 4px 8px; 
-                    border-radius: 3px; 
+                    background: #dc3545;
+                    color: white;
+                    border: none;
+                    padding: 4px 8px;
+                    border-radius: 3px;
                     font-size: 11px;
                     cursor: pointer;
                     display: none;
                 ">Stop Processing</button>
                 <button id="hcdc-test-btn" style="
-                    background: #007bff; 
-                    color: white; 
-                    border: none; 
-                    padding: 4px 8px; 
-                    border-radius: 3px; 
+                    background: #007bff;
+                    color: white;
+                    border: none;
+                    padding: 4px 8px;
+                    border-radius: 3px;
                     font-size: 11px;
                     cursor: pointer;
                 ">Test Links</button>
                 <span id="hcdc-status-text" style="font-size: 11px; color: #666;"></span>
+            </div>
+            <div id="hcdc-progress-container" style="display: none; margin-top: 8px;">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <div style="flex: 1; background: #e0e0e0; border-radius: 4px; height: 16px; overflow: hidden;">
+                        <div id="hcdc-progress-bar" style="background: linear-gradient(90deg, #28a745, #20c997); height: 100%; width: 0%; transition: width 0.3s ease; border-radius: 4px;"></div>
+                    </div>
+                    <span id="hcdc-progress-text" style="font-size: 12px; font-weight: bold; color: #333; min-width: 80px;">0 / ${docCount}</span>
+                </div>
             </div>
         `;
         
@@ -956,6 +1024,12 @@
             startBtn.style.display = 'none';
             stopBtn.style.display = 'inline-block';
             statusText.textContent = 'Processing documents...';
+            // Show progress bar and initialize it
+            const progressContainer = document.getElementById('hcdc-progress-container');
+            if (progressContainer) {
+                progressContainer.style.display = 'block';
+            }
+            updateProgressBar(0, documentLinks.length, 0, 0);
         });
         
         stopBtn.addEventListener('click', () => {
