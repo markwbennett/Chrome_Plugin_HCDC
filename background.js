@@ -153,19 +153,16 @@ function extractPDFUrl(tabId) {
             url: pdfUrl
         }, (response) => {
             console.log('Chrome PDF viewer download response:', response);
-            // Notify that PDF processing is complete
+            // Notify that PDF processing is complete, then close tab
             chrome.runtime.sendMessage({
                 action: 'notifyPDFProcessed',
                 tabId: window.currentTabId,
                 success: response?.success || false,
                 downloadId: response?.downloadId
+            }, () => {
+                window.close();
             });
         });
-        
-        // Close this tab after download
-        setTimeout(() => {
-            window.close();
-        }, 500);
         return;
     }
     
@@ -186,15 +183,13 @@ function extractPDFUrl(tabId) {
                 tabId: window.currentTabId,
                 success: response?.success || false,
                 downloadId: response?.downloadId
+            }, () => {
+                window.close();
             });
         });
-        
-        setTimeout(() => {
-            window.close();
-        }, 2000);
         return;
     }
-    
+
     // Look for PDF-related elements and URLs (for non-Chrome viewers)
     function findPDFUrl() {
         console.log('Searching for PDF URL...');
@@ -228,16 +223,13 @@ function extractPDFUrl(tabId) {
                     url: iframe.src
                 }, (response) => {
                     console.log('Download response:', response);
-                    // Notify that PDF processing is complete
                     chrome.runtime.sendMessage({
                         action: 'notifyPDFProcessed',
                         tabId: window.currentTabId,
                         success: response?.success || false,
                         downloadId: response?.downloadId
-                    });
+                    }, () => window.close());
                 });
-                // Close this wrapper tab
-                setTimeout(() => window.close(), 300);
                 return iframe.src;
             }
             if (iframe.src && (iframe.src.includes('.pdf') || iframe.src.includes('GetFile'))) {
@@ -252,9 +244,8 @@ function extractPDFUrl(tabId) {
                         tabId: window.currentTabId,
                         success: response?.success || false,
                         downloadId: response?.downloadId
-                    });
+                    }, () => window.close());
                 });
-                setTimeout(() => window.close(), 300);
                 return iframe.src;
             }
         }
@@ -284,9 +275,8 @@ function extractPDFUrl(tabId) {
                         tabId: window.currentTabId,
                         success: response?.success || false,
                         downloadId: response?.downloadId
-                    });
+                    }, () => window.close());
                 });
-                setTimeout(() => window.close(), 300);
                 return embed.src;
             }
         }
@@ -316,9 +306,8 @@ function extractPDFUrl(tabId) {
                         tabId: window.currentTabId,
                         success: response?.success || false,
                         downloadId: response?.downloadId
-                    });
+                    }, () => window.close());
                 });
-                setTimeout(() => window.close(), 300);
                 return obj.data;
             }
         }
@@ -339,18 +328,17 @@ function extractPDFUrl(tabId) {
                     tabId: window.currentTabId,
                     success: response?.success || false,
                     downloadId: response?.downloadId
-                });
+                }, () => window.close());
             });
-            setTimeout(() => window.close(), 300);
             return links[0].href;
         }
-        
+
         // Method 5: Check page source for PDF URLs
         const pageHTML = document.documentElement.outerHTML;
         console.log('Searching page HTML for PDF URLs...');
-        const pdfUrlMatch = pageHTML.match(/https?:\/\/[^"'\s]+\.pdf/i) || 
+        const pdfUrlMatch = pageHTML.match(/https?:\/\/[^"'\s]+\.pdf/i) ||
                            pageHTML.match(/https?:\/\/[^"'\s]+GetFile[^"'\s]*/i);
-        
+
         if (pdfUrlMatch) {
             console.log('Found PDF URL in page source:', pdfUrlMatch[0]);
             chrome.runtime.sendMessage({
@@ -363,9 +351,8 @@ function extractPDFUrl(tabId) {
                     tabId: window.currentTabId,
                     success: response?.success || false,
                     downloadId: response?.downloadId
-                });
+                }, () => window.close());
             });
-            setTimeout(() => window.close(), 300);
             return pdfUrlMatch[0];
         }
         
@@ -397,16 +384,13 @@ function extractPDFUrl(tabId) {
             console.log('Failed to find PDF after all attempts');
             console.log('Page HTML preview:', document.body.innerHTML.substring(0, 1000));
             
-            // Notify that PDF processing failed
+            // Notify that PDF processing failed, then close tab
             chrome.runtime.sendMessage({
                 action: 'notifyPDFProcessed',
                 tabId: window.currentTabId,
                 success: false,
                 error: 'No PDF found after all attempts'
-            });
-            
-            // Still close the tab even if we couldn't find the PDF
-            setTimeout(() => window.close(), 300);
+            }, () => window.close());
         }
     }
     
