@@ -543,31 +543,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             saveAs: false // Don't prompt user, use automatic download
         }).then(downloadId => {
             console.log('Download started with ID:', downloadId);
-            
-            // Monitor this specific download
-            const checkDownload = () => {
-                chrome.downloads.search({id: downloadId}, (results) => {
-                    if (results.length > 0) {
-                        const download = results[0];
-                        console.log('Download status:', download.state);
-                        
-                        if (download.state === 'complete') {
-                            console.log('Download completed successfully:', download.filename);
-                            sendResponse({success: true, downloadId: downloadId, filename: download.filename});
-                        } else if (download.state === 'interrupted') {
-                            console.log('Download failed:', download.error);
-                            sendResponse({success: false, error: download.error});
-                        } else {
-                            // Still in progress, check again in 1 second
-                            setTimeout(checkDownload, 1000);
-                        }
-                    }
-                });
-            };
-            
-            // Start monitoring
-            setTimeout(checkDownload, 1000);
-            
+            // Respond immediately once download starts - don't wait for completion
+            // This allows the next document to start processing while this downloads
+            sendResponse({success: true, downloadId: downloadId});
         }).catch(error => {
             console.log('Download failed:', error);
             sendResponse({success: false, error: error.message});
