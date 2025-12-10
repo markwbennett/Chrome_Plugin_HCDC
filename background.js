@@ -675,70 +675,64 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             return true;
         }
         
-        // Close current PDF tab first, then open new one (one tab at a time)
-        console.log(`DEBUG [${new Date().toISOString()}]: Closing current PDF tab (if any)...`);
-        
-        closeCurrentPDFTab().then(() => {
-            console.log(`DEBUG [${new Date().toISOString()}]: Current PDF tab closed, creating new tab...`);
-            
-            chrome.tabs.create({
-                url: request.url,
-                active: false
-            }).then(tab => {
-                currentPDFTabId = tab.id;
-                console.log(`DEBUG [${new Date().toISOString()}]: Successfully opened new PDF tab: ${tab.id}`);
-                
-                // Mark this tab as plugin-initiated
-                pluginInitiatedTabs.add(tab.id);
-                console.log(`DEBUG [${new Date().toISOString()}]: Marked tab as plugin-initiated: ${tab.id}`);
-                
-                // Store document information for this tab
-                tabDocumentInfo[tab.id] = {
-                    number: request.documentNumber || 'unknown',
-                    title: request.documentTitle || 'document',
-                    requestTime: requestStartTime
-                };
-                console.log(`DEBUG [${new Date().toISOString()}]: Stored document info for tab ${tab.id}:`, tabDocumentInfo[tab.id]);
+        // Don't close current PDF tab - let it finish and close itself via window.close()
+        // This prevents race conditions where we close a tab before it finishes processing
+        console.log(`DEBUG [${new Date().toISOString()}]: Creating new PDF tab (previous tab will close itself)...`);
 
-                // Update case number if provided
-                if (request.caseNumber && request.caseNumber !== currentCaseNumber) {
-                    console.log(`DEBUG [${new Date().toISOString()}]: Updating case number from ${currentCaseNumber} to ${request.caseNumber}`);
-                    currentCaseNumber = request.caseNumber;
+        chrome.tabs.create({
+            url: request.url,
+            active: false
+        }).then(tab => {
+            currentPDFTabId = tab.id;
+            console.log(`DEBUG [${new Date().toISOString()}]: Successfully opened new PDF tab: ${tab.id}`);
+
+            // Mark this tab as plugin-initiated
+            pluginInitiatedTabs.add(tab.id);
+            console.log(`DEBUG [${new Date().toISOString()}]: Marked tab as plugin-initiated: ${tab.id}`);
+
+            // Store document information for this tab
+            tabDocumentInfo[tab.id] = {
+                number: request.documentNumber || 'unknown',
+                title: request.documentTitle || 'document',
+                requestTime: requestStartTime
+            };
+            console.log(`DEBUG [${new Date().toISOString()}]: Stored document info for tab ${tab.id}:`, tabDocumentInfo[tab.id]);
+
+            // Update case number if provided
+            if (request.caseNumber && request.caseNumber !== currentCaseNumber) {
+                console.log(`DEBUG [${new Date().toISOString()}]: Updating case number from ${currentCaseNumber} to ${request.caseNumber}`);
+                currentCaseNumber = request.caseNumber;
+            }
+
+            // Store the response callback to be called when PDF processing completes
+            pendingResponses[tab.id] = {
+                sendResponse: sendResponse,
+                requestStartTime: requestStartTime
+            };
+            console.log(`DEBUG [${new Date().toISOString()}]: Stored pending response for tab ${tab.id}, waiting for PDF processing...`);
+
+            // Set a timeout to respond if PDF processing takes too long (30 seconds)
+            setTimeout(() => {
+                const pending = pendingResponses[tab.id];
+                if (pending) {
+                    console.log(`DEBUG [${new Date().toISOString()}]: Timeout waiting for PDF processing on tab ${tab.id}`);
+                    pending.sendResponse({
+                        success: true,
+                        tabId: tab.id,
+                        downloadSuccess: false,
+                        skipped: true,
+                        reason: 'Timeout waiting for PDF',
+                        processingTime: Date.now() - pending.requestStartTime
+                    });
+                    delete pendingResponses[tab.id];
+                    delete tabDocumentInfo[tab.id];
+                    // Close the tab if it's still open
+                    chrome.tabs.remove(tab.id).catch(() => {});
                 }
+            }, 30000); // 30 second timeout
 
-                // Store the response callback to be called when PDF processing completes
-                pendingResponses[tab.id] = {
-                    sendResponse: sendResponse,
-                    requestStartTime: requestStartTime
-                };
-                console.log(`DEBUG [${new Date().toISOString()}]: Stored pending response for tab ${tab.id}, waiting for PDF processing...`);
-
-                // Set a timeout to respond if PDF processing takes too long (30 seconds)
-                setTimeout(() => {
-                    const pending = pendingResponses[tab.id];
-                    if (pending) {
-                        console.log(`DEBUG [${new Date().toISOString()}]: Timeout waiting for PDF processing on tab ${tab.id}`);
-                        pending.sendResponse({
-                            success: true,
-                            tabId: tab.id,
-                            downloadSuccess: false,
-                            skipped: true,
-                            reason: 'Timeout waiting for PDF',
-                            processingTime: Date.now() - pending.requestStartTime
-                        });
-                        delete pendingResponses[tab.id];
-                        delete tabDocumentInfo[tab.id];
-                        // Close the tab if it's still open
-                        chrome.tabs.remove(tab.id).catch(() => {});
-                    }
-                }, 30000); // 30 second timeout
-                
-            }).catch(error => {
-                console.log(`DEBUG [${new Date().toISOString()}]: Failed to create PDF tab:`, error);
-                sendResponse({success: false, error: error.message});
-            });
         }).catch(error => {
-            console.log(`DEBUG [${new Date().toISOString()}]: Failed to close current PDF tab:`, error);
+            console.log(`DEBUG [${new Date().toISOString()}]: Failed to create PDF tab:`, error);
             sendResponse({success: false, error: error.message});
         });
         
