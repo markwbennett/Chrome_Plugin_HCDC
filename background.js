@@ -394,8 +394,8 @@ function extractPDFUrl(tabId) {
         }
     }
     
-    // Start with brief delay to allow page to load
-    setTimeout(waitAndExtract, 500);
+    // Start with delay to allow page to fully load
+    setTimeout(waitAndExtract, 1500);
 }
 
 // Function to check if file already exists

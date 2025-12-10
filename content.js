@@ -126,10 +126,11 @@
         return randomDelay;
     }
 
-    // Function to generate humanlike random pauses (0.5-1.5 seconds)
+    // Function to generate humanlike random pauses (3-5 seconds)
+    // This keeps us well under the 18 requests/60s rate limit (~12-20 req/min)
     function getHumanlikeDelay() {
-        const minDelay = 500; // 0.5 seconds
-        const maxDelay = 1500; // 1.5 seconds
+        const minDelay = 3000; // 3 seconds
+        const maxDelay = 5000; // 5 seconds
         const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
         console.log(`Humanlike delay: ${randomDelay}ms (range: ${minDelay}-${maxDelay}ms)`);
         return randomDelay;
