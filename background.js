@@ -11,7 +11,8 @@ let sessionDownloads = new Set();
 // Track the current PDF tab to ensure only one is open at a time
 let currentPDFTabId = null;
 
-// Store response callbacks for tabs waiting for download completion (removed - now respond immediately)
+// Store response callbacks for tabs waiting for download completion
+let pendingResponses = {};
 
 // Store document information for each tab
 let tabDocumentInfo = {};
@@ -77,13 +78,28 @@ chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
         console.log('Current PDF tab closed:', tabId);
         currentPDFTabId = null;
     }
-    
+
     // Clean up stored document info
     if (tabDocumentInfo[tabId]) {
         console.log('DEBUG: Cleaning up document info for tab:', tabId);
         delete tabDocumentInfo[tabId];
     }
-    
+
+    // Clean up pending responses - respond with failure if tab closed before processing
+    if (pendingResponses[tabId]) {
+        console.log('DEBUG: Tab closed before PDF processing completed:', tabId);
+        const pending = pendingResponses[tabId];
+        pending.sendResponse({
+            success: true,
+            tabId: tabId,
+            downloadSuccess: false,
+            skipped: true,
+            reason: 'Tab closed before processing completed',
+            processingTime: Date.now() - pending.requestStartTime
+        });
+        delete pendingResponses[tabId];
+    }
+
     // Clean up plugin-initiated tab tracking
     if (pluginInitiatedTabs.has(tabId)) {
         console.log('DEBUG: Cleaning up plugin-initiated tab tracking for:', tabId);
@@ -676,40 +692,46 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 pluginInitiatedTabs.add(tab.id);
                 console.log(`DEBUG [${new Date().toISOString()}]: Marked tab as plugin-initiated: ${tab.id}`);
                 
-                // Store document information for this tab (without callback since we respond immediately)
+                // Store document information for this tab
                 tabDocumentInfo[tab.id] = {
                     number: request.documentNumber || 'unknown',
                     title: request.documentTitle || 'document',
                     requestTime: requestStartTime
                 };
                 console.log(`DEBUG [${new Date().toISOString()}]: Stored document info for tab ${tab.id}:`, tabDocumentInfo[tab.id]);
-                
+
                 // Update case number if provided
                 if (request.caseNumber && request.caseNumber !== currentCaseNumber) {
                     console.log(`DEBUG [${new Date().toISOString()}]: Updating case number from ${currentCaseNumber} to ${request.caseNumber}`);
                     currentCaseNumber = request.caseNumber;
                 }
-                
-                // TEMP FIX: Respond immediately instead of waiting for PDF processing
-                // This will allow the content script to continue while PDF processing happens in background
-                console.log(`DEBUG [${new Date().toISOString()}]: Responding immediately to allow content script to continue`);
-                sendResponse({
-                    success: true,
-                    tabId: tab.id,
-                    downloadSuccess: true, // Assume success for now
-                    processingTime: Date.now() - requestStartTime
-                });
-                
-                // Still set a timeout to clean up if PDF processing hangs
+
+                // Store the response callback to be called when PDF processing completes
+                pendingResponses[tab.id] = {
+                    sendResponse: sendResponse,
+                    requestStartTime: requestStartTime
+                };
+                console.log(`DEBUG [${new Date().toISOString()}]: Stored pending response for tab ${tab.id}, waiting for PDF processing...`);
+
+                // Set a timeout to respond if PDF processing takes too long (30 seconds)
                 setTimeout(() => {
-                    const docInfo = tabDocumentInfo[tab.id];
-                    if (docInfo) {
-                        console.log(`DEBUG [${new Date().toISOString()}]: Cleaning up hung tab ${tab.id}`);
+                    const pending = pendingResponses[tab.id];
+                    if (pending) {
+                        console.log(`DEBUG [${new Date().toISOString()}]: Timeout waiting for PDF processing on tab ${tab.id}`);
+                        pending.sendResponse({
+                            success: true,
+                            tabId: tab.id,
+                            downloadSuccess: false,
+                            skipped: true,
+                            reason: 'Timeout waiting for PDF',
+                            processingTime: Date.now() - pending.requestStartTime
+                        });
+                        delete pendingResponses[tab.id];
                         delete tabDocumentInfo[tab.id];
                         // Close the tab if it's still open
                         chrome.tabs.remove(tab.id).catch(() => {});
                     }
-                }, 10000); // 10 second cleanup timeout
+                }, 30000); // 30 second timeout
                 
             }).catch(error => {
                 console.log(`DEBUG [${new Date().toISOString()}]: Failed to create PDF tab:`, error);
@@ -752,25 +774,41 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             downloadId: request.downloadId,
             error: request.error
         });
-        
-        // Clean up the stored document info since we don't need callbacks anymore
+
+        // Get the pending response callback for this tab
+        const pending = pendingResponses[request.tabId];
         const docInfo = tabDocumentInfo[request.tabId];
-        if (docInfo) {
-            const processingTime = Date.now() - docInfo.requestTime;
-            console.log(`DEBUG [${new Date().toISOString()}]: PDF processing completed for tab ${request.tabId} in ${processingTime}ms`);
-            console.log(`DEBUG [${new Date().toISOString()}]: Download result: ${request.success ? 'SUCCESS' : 'FAILED'}`);
-            
-            // Clean up the stored info
-            delete tabDocumentInfo[request.tabId];
+
+        if (pending) {
+            const processingTime = Date.now() - pending.requestStartTime;
+            console.log(`DEBUG [${new Date().toISOString()}]: Responding to content script for tab ${request.tabId} after ${processingTime}ms`);
+
+            // Send the response back to the content script
+            pending.sendResponse({
+                success: true,
+                tabId: request.tabId,
+                downloadSuccess: request.success,
+                skipped: !request.success,
+                reason: request.error || (request.success ? null : 'Download failed'),
+                processingTime: processingTime
+            });
+
+            // Clean up
+            delete pendingResponses[request.tabId];
         } else {
-            console.log(`DEBUG [${new Date().toISOString()}]: No document info found for tab ${request.tabId}`);
+            console.log(`DEBUG [${new Date().toISOString()}]: No pending response found for tab ${request.tabId}`);
         }
-        
+
+        if (docInfo) {
+            console.log(`DEBUG [${new Date().toISOString()}]: Cleaning up document info for tab ${request.tabId}`);
+            delete tabDocumentInfo[request.tabId];
+        }
+
         // Close the PDF tab after processing
         chrome.tabs.remove(request.tabId).catch(err => {
             console.log(`DEBUG [${new Date().toISOString()}]: Could not close tab ${request.tabId}:`, err);
         });
-        
+
         sendResponse({success: true});
         return true;
     }
