@@ -1,4 +1,7 @@
 // Background service worker for Harris County District Clerk Auto Clicker
+// Timing/orchestration lives here so downloads continue when the case tab is
+// backgrounded. Chrome throttles setTimeout in inactive tabs; the service
+// worker is not subject to that throttle (and chrome.alarms survives SW sleep).
 const manifest = chrome.runtime.getManifest();
 console.log(`HCDC Auto Clicker v${manifest.version} background script loaded at:`, new Date().toISOString());
 
@@ -20,10 +23,86 @@ let tabDocumentInfo = {};
 // Track plugin-initiated vs manual PDF tab opens
 let pluginInitiatedTabs = new Set();
 
+// Tabs currently mid-extraction (prevent double processViewFilePage)
+let extractingTabs = new Set();
+
+// Content-script delay callbacks (id -> sendResponse)
+const pendingDelays = new Map();
+let delaySeq = 0;
+
+// Keep-alive ports from content scripts while a download session is running
+const keepAlivePorts = new Set();
+const KEEPALIVE_ALARM = 'hcdc-session-keepalive';
+
 // Function to generate session key for duplicate checking
 function generateSessionKey(caseNumber, docNumber, docTitle) {
     return `${caseNumber}_${docNumber}_${docTitle}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
 }
+
+/** Promise-based delay that runs in the service worker (not a page timer). */
+function swDelay(ms) {
+    return new Promise((resolve) => {
+        const id = `swd_${++delaySeq}_${Date.now()}`;
+        pendingDelays.set(id, () => resolve());
+        const when = Date.now() + Math.max(0, ms || 0);
+        // Alarms are durable across SW restarts for longer waits; short waits use setTimeout.
+        if (ms <= 25000) {
+            setTimeout(() => {
+                const cb = pendingDelays.get(id);
+                if (cb) {
+                    pendingDelays.delete(id);
+                    cb();
+                }
+            }, Math.max(0, ms || 0));
+        } else {
+            chrome.alarms.create(id, { when });
+        }
+    });
+}
+
+function startSessionKeepAlive() {
+    // Chrome clamps periodInMinutes below 1 in production; 1 min is enough as a SW wake tick.
+    chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 1 });
+    console.log(`DEBUG [${new Date().toISOString()}]: Session keep-alive alarm started`);
+}
+
+function stopSessionKeepAlive() {
+    chrome.alarms.clear(KEEPALIVE_ALARM);
+    console.log(`DEBUG [${new Date().toISOString()}]: Session keep-alive alarm stopped`);
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === KEEPALIVE_ALARM) {
+        // Wake-only; ports + active work keep the session alive.
+        console.log(`DEBUG [${new Date().toISOString()}]: Keep-alive tick (ports=${keepAlivePorts.size})`);
+        return;
+    }
+    const cb = pendingDelays.get(alarm.name);
+    if (cb) {
+        pendingDelays.delete(alarm.name);
+        try { cb(); } catch (e) { console.log('Delay callback error:', e); }
+    }
+});
+
+// Long-lived ports keep the service worker alive while the content script runs.
+chrome.runtime.onConnect.addListener((port) => {
+    if (port.name !== 'hcdc-keepalive') return;
+    keepAlivePorts.add(port);
+    startSessionKeepAlive();
+    console.log(`DEBUG [${new Date().toISOString()}]: Keep-alive port connected (total=${keepAlivePorts.size})`);
+    port.onDisconnect.addListener(() => {
+        keepAlivePorts.delete(port);
+        console.log(`DEBUG [${new Date().toISOString()}]: Keep-alive port disconnected (total=${keepAlivePorts.size})`);
+        if (keepAlivePorts.size === 0) {
+            stopSessionKeepAlive();
+        }
+    });
+    port.onMessage.addListener((msg) => {
+        if (msg && msg.type === 'ping') {
+            try { port.postMessage({ type: 'pong', t: Date.now() }); } catch (_) {}
+        }
+    });
+});
 
 // Listen for tab updates to handle ViewFilePage tabs
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
@@ -43,34 +122,125 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
             console.log(`DEBUG [${new Date().toISOString()}]: Skipping auto-download for manually opened PDF viewer tab: ${tabId}`);
             return;
         }
-        
-        console.log(`DEBUG [${new Date().toISOString()}]: Injecting PDF extraction script into tab: ${tabId}`);
+
+        if (extractingTabs.has(tabId)) {
+            console.log(`DEBUG [${new Date().toISOString()}]: Extraction already in progress for tab ${tabId}`);
+            return;
+        }
         
         // Store this as the current PDF tab
         currentPDFTabId = tabId;
-        
-        // Inject script to extract the actual PDF URL
-        chrome.scripting.executeScript({
-            target: { tabId: tabId },
-            func: extractPDFUrl,
-            args: [tabId]
-        }).then(() => {
-            console.log(`DEBUG [${new Date().toISOString()}]: PDF extraction script injected successfully into tab ${tabId}`);
-        }).catch(err => {
-            console.log(`DEBUG [${new Date().toISOString()}]: Failed to inject PDF extraction script into tab ${tabId}:`, err);
-            
-            // If injection fails, notify that processing failed immediately
-            chrome.runtime.sendMessage({
-                action: 'notifyPDFProcessed',
-                tabId: tabId,
-                success: false,
-                error: 'Script injection failed: ' + err.message
-            }).catch(err2 => {
-                console.log(`DEBUG [${new Date().toISOString()}]: Could not send notifyPDFProcessed message:`, err2);
-            });
-        });
+
+        // Drive extraction from the service worker (not in-tab setTimeout, which
+        // Chrome throttles heavily for inactive PDF tabs opened with active:false).
+        processViewFilePage(tabId);
     }
 });
+
+/**
+ * Poll the ViewFilePage tab from the service worker until a PDF URL appears,
+ * then download it. Retries use SW timers so background tabs keep working.
+ */
+async function processViewFilePage(tabId) {
+    extractingTabs.add(tabId);
+    const maxAttempts = 12;
+    const gapMs = 750;
+    console.log(`DEBUG [${new Date().toISOString()}]: processViewFilePage start for tab ${tabId}`);
+
+    try {
+        // Brief initial wait for iframes/embeds to populate
+        await swDelay(800);
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            // Tab may have been closed mid-poll
+            if (!pluginInitiatedTabs.has(tabId) && !pendingResponses[tabId]) {
+                console.log(`DEBUG [${new Date().toISOString()}]: Tab ${tabId} no longer tracked; aborting extract`);
+                return;
+            }
+
+            let pdfUrl = null;
+            try {
+                const results = await chrome.scripting.executeScript({
+                    target: { tabId },
+                    func: findPDFUrlOnce
+                });
+                pdfUrl = results && results[0] ? results[0].result : null;
+            } catch (err) {
+                console.log(`DEBUG [${new Date().toISOString()}]: executeScript attempt ${attempt} failed on tab ${tabId}:`, err.message);
+                // If tab is gone, finish as failure
+                if (String(err.message || err).includes('No tab with id') ||
+                    String(err.message || err).includes('Cannot access')) {
+                    completePDFProcessing(tabId, false, null, 'Tab inaccessible: ' + err.message);
+                    return;
+                }
+            }
+
+            console.log(`DEBUG [${new Date().toISOString()}]: Extract attempt ${attempt}/${maxAttempts} tab ${tabId}: ${pdfUrl ? pdfUrl.substring(0, 120) : 'null'}`);
+
+            if (pdfUrl && typeof pdfUrl === 'string' && pdfUrl.startsWith('http')) {
+                try {
+                    const downloadId = await chrome.downloads.download({
+                        url: pdfUrl,
+                        saveAs: false
+                    });
+                    console.log(`DEBUG [${new Date().toISOString()}]: Download started id=${downloadId} for tab ${tabId}`);
+                    completePDFProcessing(tabId, true, downloadId, null);
+                } catch (dlErr) {
+                    console.log(`DEBUG [${new Date().toISOString()}]: Download failed for tab ${tabId}:`, dlErr);
+                    completePDFProcessing(tabId, false, null, dlErr.message || String(dlErr));
+                }
+                return;
+            }
+
+            if (attempt < maxAttempts) {
+                await swDelay(gapMs);
+            }
+        }
+
+        completePDFProcessing(tabId, false, null, 'No PDF found after all attempts');
+    } finally {
+        extractingTabs.delete(tabId);
+    }
+}
+
+/**
+ * Resolve the content-script callback for a finished PDF tab and close the tab.
+ * Used by both SW-driven extraction and the legacy notifyPDFProcessed message path.
+ */
+function completePDFProcessing(tabId, success, downloadId, error) {
+    console.log(`DEBUG [${new Date().toISOString()}]: completePDFProcessing tab=${tabId} success=${success} downloadId=${downloadId} error=${error}`);
+
+    const pending = pendingResponses[tabId];
+    const docInfo = tabDocumentInfo[tabId];
+
+    if (pending) {
+        const processingTime = Date.now() - pending.requestStartTime;
+        try {
+            pending.sendResponse({
+                success: true,
+                tabId: tabId,
+                downloadSuccess: !!success,
+                skipped: !success,
+                reason: error || (success ? null : 'Download failed'),
+                processingTime: processingTime,
+                downloadId: downloadId || undefined
+            });
+        } catch (e) {
+            console.log(`DEBUG [${new Date().toISOString()}]: sendResponse failed for tab ${tabId}:`, e);
+        }
+        delete pendingResponses[tabId];
+    } else {
+        console.log(`DEBUG [${new Date().toISOString()}]: No pending response for tab ${tabId}`);
+    }
+
+    if (docInfo) {
+        delete tabDocumentInfo[tabId];
+    }
+
+    chrome.tabs.remove(tabId).catch(err => {
+        console.log(`DEBUG [${new Date().toISOString()}]: Could not close tab ${tabId}:`, err);
+    });
+}
 
 // Listen for tab removal to clear tracking
 chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
@@ -123,279 +293,66 @@ function closeCurrentPDFTab() {
 }
 
 /**
- * Extracts the direct PDF URL from the District Clerk ViewFilePage and triggers a download.
- * Executed as an injected script inside the newly opened viewer tab.
- * After locating the PDF resource, the function messages the background script with
- * action 'downloadPDF' and closes the tab.
- *
- * @param {number} tabId - Identifier of the tab where extraction occurs.
+ * One-shot PDF URL probe. Injected into the ViewFilePage tab via executeScript.
+ * Returns a URL string or null — no timers, no messaging (callers retry from the SW).
+ * Must be self-contained: serialized into the tab, cannot close over SW state.
  */
-function extractPDFUrl(tabId) {
-    const extractStartTime = Date.now();
-    console.log(`DEBUG [${new Date().toISOString()}]: Starting PDF extraction from ViewFilePage`);
-    console.log(`DEBUG [${new Date().toISOString()}]: Current URL: ${window.location.href}`);
-    console.log(`DEBUG [${new Date().toISOString()}]: Tab ID: ${tabId}`);
-    
-    // Store tab ID for notifications
-    window.currentTabId = tabId;
-    
-    // Check if this is Chrome's PDF viewer - skip download attempts since we handle it via API
+function findPDFUrlOnce() {
+    // Chrome built-in PDF viewer
     if (document.querySelector('pdf-viewer')) {
-        console.log('This is Chrome PDF viewer - downloading directly from current URL');
-        
-        // For Chrome PDF viewer, the current URL is the PDF URL
-        const pdfUrl = window.location.href;
-        console.log('Chrome PDF viewer URL:', pdfUrl);
-        
-        // Send message to background script to download the PDF
-        chrome.runtime.sendMessage({
-            action: 'downloadPDF',
-            url: pdfUrl
-        }, (response) => {
-            console.log('Chrome PDF viewer download response:', response);
-            // Notify that PDF processing is complete, then close tab
-            chrome.runtime.sendMessage({
-                action: 'notifyPDFProcessed',
-                tabId: window.currentTabId,
-                success: response?.success || false,
-                downloadId: response?.downloadId
-            }, () => {
-                window.close();
-            });
-        });
-        return;
+        return window.location.href;
     }
-    
-    // Also check for Chrome's PDF viewer in a different way
     if (document.contentType && document.contentType.includes('pdf')) {
-        console.log('PDF content type detected - downloading directly from current URL');
-        
-        const pdfUrl = window.location.href;
-        console.log('PDF content URL:', pdfUrl);
-        
-        chrome.runtime.sendMessage({
-            action: 'downloadPDF',
-            url: pdfUrl
-        }, (response) => {
-            console.log('PDF content download response:', response);
-            chrome.runtime.sendMessage({
-                action: 'notifyPDFProcessed',
-                tabId: window.currentTabId,
-                success: response?.success || false,
-                downloadId: response?.downloadId
-            }, () => {
-                window.close();
-            });
-        });
-        return;
+        return window.location.href;
     }
 
-    // Look for PDF-related elements and URLs (for non-Chrome viewers)
-    function findPDFUrl() {
-        console.log('Searching for PDF URL...');
-        console.log('Page title:', document.title);
-        console.log('Page URL:', window.location.href);
-        console.log('Document ready state:', document.readyState);
-        
-        // Log page structure for debugging
-        console.log('Body innerHTML length:', document.body.innerHTML.length);
-        console.log('Body text content preview:', document.body.textContent.substring(0, 200));
-        
-        // Method 1: Look for iframe with ViewFilePage (this leads to the actual PDF)
-        const iframes = document.querySelectorAll('iframe');
-        console.log('Found iframes:', iframes.length);
-        
-        for (let i = 0; i < iframes.length; i++) {
-            const iframe = iframes[i];
-            console.log(`Iframe ${i}:`, {
-                src: iframe.src,
-                id: iframe.id,
-                className: iframe.className,
-                width: iframe.width,
-                height: iframe.height
-            });
-            
-            if (iframe.src && iframe.src.includes('ViewFilePage.aspx')) {
-                console.log('Found ViewFilePage iframe - downloading PDF directly');
-                // Send message to background script to download the PDF
-                chrome.runtime.sendMessage({
-                    action: 'downloadPDF',
-                    url: iframe.src
-                }, (response) => {
-                    console.log('Download response:', response);
-                    chrome.runtime.sendMessage({
-                        action: 'notifyPDFProcessed',
-                        tabId: window.currentTabId,
-                        success: response?.success || false,
-                        downloadId: response?.downloadId
-                    }, () => window.close());
-                });
-                return iframe.src;
-            }
-            if (iframe.src && (iframe.src.includes('.pdf') || iframe.src.includes('GetFile'))) {
-                console.log('Found direct PDF iframe:', iframe.src);
-                chrome.runtime.sendMessage({
-                    action: 'downloadPDF',
-                    url: iframe.src
-                }, (response) => {
-                    console.log('Download response:', response);
-                    chrome.runtime.sendMessage({
-                        action: 'notifyPDFProcessed',
-                        tabId: window.currentTabId,
-                        success: response?.success || false,
-                        downloadId: response?.downloadId
-                    }, () => window.close());
-                });
-                return iframe.src;
-            }
-        }
-        
-        // Method 2: Look for embed elements
-        const embeds = document.querySelectorAll('embed');
-        console.log('Found embeds:', embeds.length);
-        
-        for (let i = 0; i < embeds.length; i++) {
-            const embed = embeds[i];
-            console.log(`Embed ${i}:`, {
-                src: embed.src,
-                type: embed.type,
-                width: embed.width,
-                height: embed.height
-            });
-            
-            if (embed.src && (embed.src.includes('.pdf') || embed.src.includes('GetFile'))) {
-                console.log('Found PDF embed:', embed.src);
-                chrome.runtime.sendMessage({
-                    action: 'downloadPDF',
-                    url: embed.src
-                }, (response) => {
-                    console.log('Download response:', response);
-                    chrome.runtime.sendMessage({
-                        action: 'notifyPDFProcessed',
-                        tabId: window.currentTabId,
-                        success: response?.success || false,
-                        downloadId: response?.downloadId
-                    }, () => window.close());
-                });
-                return embed.src;
-            }
-        }
-        
-        // Method 3: Look for object elements
-        const objects = document.querySelectorAll('object');
-        console.log('Found objects:', objects.length);
-        
-        for (let i = 0; i < objects.length; i++) {
-            const obj = objects[i];
-            console.log(`Object ${i}:`, {
-                data: obj.data,
-                type: obj.type,
-                width: obj.width,
-                height: obj.height
-            });
-            
-            if (obj.data && (obj.data.includes('.pdf') || obj.data.includes('GetFile'))) {
-                console.log('Found PDF object:', obj.data);
-                chrome.runtime.sendMessage({
-                    action: 'downloadPDF',
-                    url: obj.data
-                }, (response) => {
-                    console.log('Download response:', response);
-                    chrome.runtime.sendMessage({
-                        action: 'notifyPDFProcessed',
-                        tabId: window.currentTabId,
-                        success: response?.success || false,
-                        downloadId: response?.downloadId
-                    }, () => window.close());
-                });
-                return obj.data;
-            }
-        }
-        
-        // Method 4: Look for links to PDF files
-        const links = document.querySelectorAll('a[href*=".pdf"], a[href*="GetFile"]');
-        console.log('Found PDF links:', links.length);
-        
-        if (links.length > 0) {
-            console.log('Found PDF link:', links[0].href);
-            chrome.runtime.sendMessage({
-                action: 'downloadPDF',
-                url: links[0].href
-            }, (response) => {
-                console.log('Download response:', response);
-                chrome.runtime.sendMessage({
-                    action: 'notifyPDFProcessed',
-                    tabId: window.currentTabId,
-                    success: response?.success || false,
-                    downloadId: response?.downloadId
-                }, () => window.close());
-            });
-            return links[0].href;
-        }
-
-        // Method 5: Check page source for PDF URLs
-        const pageHTML = document.documentElement.outerHTML;
-        console.log('Searching page HTML for PDF URLs...');
-        const pdfUrlMatch = pageHTML.match(/https?:\/\/[^"'\s]+\.pdf/i) ||
-                           pageHTML.match(/https?:\/\/[^"'\s]+GetFile[^"'\s]*/i);
-
-        if (pdfUrlMatch) {
-            console.log('Found PDF URL in page source:', pdfUrlMatch[0]);
-            chrome.runtime.sendMessage({
-                action: 'downloadPDF',
-                url: pdfUrlMatch[0]
-            }, (response) => {
-                console.log('Download response:', response);
-                chrome.runtime.sendMessage({
-                    action: 'notifyPDFProcessed',
-                    tabId: window.currentTabId,
-                    success: response?.success || false,
-                    downloadId: response?.downloadId
-                }, () => window.close());
-            });
-            return pdfUrlMatch[0];
-        }
-        
-        console.log('No PDF URL found in page');
-        console.log('All iframe sources:', Array.from(document.querySelectorAll('iframe')).map(i => i.src));
-        console.log('All embed sources:', Array.from(document.querySelectorAll('embed')).map(e => e.src));
-        console.log('All object data:', Array.from(document.querySelectorAll('object')).map(o => o.data));
-        
-        return null;
-    }
-    
-    // Improved waiting strategy with multiple attempts
-    let attempts = 0;
-    const maxAttempts = 5;
-    
-    function waitAndExtract() {
-        attempts++;
-        console.log(`PDF extraction attempt ${attempts}/${maxAttempts}`);
-        
-        const pdfUrl = findPDFUrl();
-        
-        if (pdfUrl) {
-            console.log('Found PDF URL:', pdfUrl);
-            return; // Success - message already sent to background
-        } else if (attempts < maxAttempts) {
-            console.log(`No PDF found on attempt ${attempts}, retrying in 500ms...`);
-            setTimeout(waitAndExtract, 500);
-        } else {
-            console.log('Failed to find PDF after all attempts');
-            console.log('Page HTML preview:', document.body.innerHTML.substring(0, 1000));
-            
-            // Notify that PDF processing failed, then close tab
-            chrome.runtime.sendMessage({
-                action: 'notifyPDFProcessed',
-                tabId: window.currentTabId,
-                success: false,
-                error: 'No PDF found after all attempts'
-            }, () => window.close());
+    const iframes = document.querySelectorAll('iframe');
+    for (let i = 0; i < iframes.length; i++) {
+        const src = iframes[i].src;
+        if (!src) continue;
+        if (src.includes('ViewFilePage.aspx') || src.includes('.pdf') || src.includes('GetFile')) {
+            return src;
         }
     }
-    
-    // Start with delay to allow page to fully load
-    setTimeout(waitAndExtract, 1500);
+
+    const embeds = document.querySelectorAll('embed');
+    for (let i = 0; i < embeds.length; i++) {
+        const src = embeds[i].src;
+        if (src && (src.includes('.pdf') || src.includes('GetFile'))) {
+            return src;
+        }
+    }
+
+    const objects = document.querySelectorAll('object');
+    for (let i = 0; i < objects.length; i++) {
+        const data = objects[i].data;
+        if (data && (data.includes('.pdf') || data.includes('GetFile'))) {
+            return data;
+        }
+    }
+
+    const links = document.querySelectorAll('a[href*=".pdf"], a[href*="GetFile"]');
+    if (links.length > 0 && links[0].href) {
+        return links[0].href;
+    }
+
+    const pageHTML = document.documentElement ? document.documentElement.outerHTML : '';
+    const pdfUrlMatch = pageHTML.match(/https?:\/\/[^"'\s]+\.pdf/i) ||
+                       pageHTML.match(/https?:\/\/[^"'\s]+GetFile[^"'\s]*/i);
+    if (pdfUrlMatch) {
+        return pdfUrlMatch[0];
+    }
+
+    // Direct ViewFilePage URL itself often serves the file once the session cookie is present
+    if (window.location.href.includes('ViewFilePage.aspx')) {
+        // Only fall back to the page URL if body looks empty / binary (PDF plug-in)
+        const bodyText = (document.body && document.body.innerText) ? document.body.innerText.trim() : '';
+        if (bodyText.length < 40) {
+            return window.location.href;
+        }
+    }
+
+    return null;
 }
 
 // Function to check if file already exists
@@ -525,6 +482,41 @@ chrome.downloads.onChanged.addListener((downloadDelta) => {
 
 // Handle messages from content script
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    // Schedule a delay in the service worker so content-script orchestration
+    // is not subject to Chrome's background-tab timer throttling.
+    if (request.action === 'scheduleDelay') {
+        const ms = Math.max(0, Number(request.ms) || 0);
+        const id = `delay_${++delaySeq}_${Date.now()}`;
+        console.log(`DEBUG [${new Date().toISOString()}]: scheduleDelay ${ms}ms id=${id}`);
+        pendingDelays.set(id, () => {
+            try { sendResponse({ done: true, id }); } catch (e) {
+                console.log('scheduleDelay sendResponse failed:', e);
+            }
+        });
+        if (ms <= 25000) {
+            setTimeout(() => {
+                const cb = pendingDelays.get(id);
+                if (cb) {
+                    pendingDelays.delete(id);
+                    cb();
+                }
+            }, ms);
+        } else {
+            chrome.alarms.create(id, { when: Date.now() + ms });
+        }
+        return true;
+    }
+
+    if (request.action === 'sessionKeepAlive') {
+        if (request.enabled) {
+            startSessionKeepAlive();
+        } else if (keepAlivePorts.size === 0) {
+            stopSessionKeepAlive();
+        }
+        sendResponse({ success: true });
+        return true;
+    }
+
     if (request.action === 'downloadPDF') {
         console.log('Downloading PDF from URL:', request.url);
         console.log('Case number:', currentCaseNumber);
@@ -718,47 +710,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         
         return true; // Keep message channel open for async response
     } else if (request.action === 'notifyPDFProcessed') {
-        console.log(`DEBUG [${new Date().toISOString()}]: PDF processing completed for tab: ${request.tabId}`);
-        console.log(`DEBUG [${new Date().toISOString()}]: PDF processing result:`, {
-            success: request.success,
-            downloadId: request.downloadId,
-            error: request.error
-        });
-
-        // Get the pending response callback for this tab
-        const pending = pendingResponses[request.tabId];
-        const docInfo = tabDocumentInfo[request.tabId];
-
-        if (pending) {
-            const processingTime = Date.now() - pending.requestStartTime;
-            console.log(`DEBUG [${new Date().toISOString()}]: Responding to content script for tab ${request.tabId} after ${processingTime}ms`);
-
-            // Send the response back to the content script
-            pending.sendResponse({
-                success: true,
-                tabId: request.tabId,
-                downloadSuccess: request.success,
-                skipped: !request.success,
-                reason: request.error || (request.success ? null : 'Download failed'),
-                processingTime: processingTime
-            });
-
-            // Clean up
-            delete pendingResponses[request.tabId];
-        } else {
-            console.log(`DEBUG [${new Date().toISOString()}]: No pending response found for tab ${request.tabId}`);
-        }
-
-        if (docInfo) {
-            console.log(`DEBUG [${new Date().toISOString()}]: Cleaning up document info for tab ${request.tabId}`);
-            delete tabDocumentInfo[request.tabId];
-        }
-
-        // Close the PDF tab after processing
-        chrome.tabs.remove(request.tabId).catch(err => {
-            console.log(`DEBUG [${new Date().toISOString()}]: Could not close tab ${request.tabId}:`, err);
-        });
-
+        // Legacy path (older injected extractors). Prefer SW-driven processViewFilePage.
+        console.log(`DEBUG [${new Date().toISOString()}]: notifyPDFProcessed for tab: ${request.tabId}`);
+        completePDFProcessing(
+            request.tabId,
+            !!request.success,
+            request.downloadId || null,
+            request.error || null
+        );
         sendResponse({success: true});
         return true;
     }

@@ -11,6 +11,7 @@ Browser extensions that automatically download PDFs from Harris County District 
 - Automatically detects and clicks on all document links with image numbers
 - Automatically downloads PDFs when they open in new tabs
 - Automatically closes PDF tabs after download completes
+- Continues downloading after you leave the tab or switch apps (background-safe; v2.3+)
 - Configurable delay between clicks (1-10 seconds)
 - Visual status indicator and progress tracking
 - Start/stop controls
@@ -48,12 +49,14 @@ Browser extensions that automatically download PDFs from Harris County District 
 
 The extension:
 1. Scans the page for links with class `dcoLink` that contain `OpenImageViewerConf` in their href
-2. Clicks each link sequentially with a configurable delay
-3. When a PDF opens in a new tab, automatically clicks the download button
+2. Opens each document’s ViewFilePage in a background tab, with rate-limited delays
+3. The service worker extracts the PDF URL and starts the download (no need to focus the tab)
 4. Closes the PDF tab after the download starts
-5. Returns to the main page to click the next document link
+5. Continues with the next document even if the case page is in the background
 6. Provides real-time progress updates
 7. Automatically stops when all links have been clicked
+
+**Background-safe (v2.3+):** Delays and PDF extraction retries run in the extension service worker, not in page timers. Chrome throttles `setTimeout` in inactive tabs; without that change, leaving the tab would stall the queue. Keep the browser open and leave the case tab open (it may be unfocused). Do not close the case tab while a run is in progress.
 
 ## Files
 

@@ -39,6 +39,76 @@
     let downloadedCount = 0; // Track successful downloads
     let skippedCount = 0; // Track skipped/failed downloads
 
+    // Long-lived port + SW delays so processing continues when this tab is backgrounded.
+    // Chrome throttles setTimeout in inactive tabs; the service worker does not.
+    let keepAlivePort = null;
+    let keepAlivePingTimer = null;
+
+    /**
+     * Delay via the background service worker. Prefer this over setTimeout for any
+     * orchestration timing that must keep running while the tab is not focused.
+     */
+    function bgDelay(ms) {
+        return new Promise((resolve) => {
+            try {
+                chrome.runtime.sendMessage({ action: 'scheduleDelay', ms: Math.max(0, ms || 0) }, () => {
+                    // Ignore lastError if SW was reloading; still resolve so the loop advances.
+                    if (chrome.runtime.lastError) {
+                        console.log('bgDelay lastError (continuing):', chrome.runtime.lastError.message);
+                    }
+                    resolve();
+                });
+            } catch (e) {
+                console.log('bgDelay send failed, falling back to setTimeout:', e);
+                setTimeout(resolve, Math.max(0, ms || 0));
+            }
+        });
+    }
+
+    function startKeepAlive() {
+        stopKeepAlive();
+        try {
+            keepAlivePort = chrome.runtime.connect({ name: 'hcdc-keepalive' });
+            keepAlivePort.onDisconnect.addListener(() => {
+                keepAlivePort = null;
+                if (isRunning) {
+                    // Reconnect; use bgDelay so reconnect itself is not tab-throttled.
+                    bgDelay(1000).then(() => {
+                        if (isRunning) startKeepAlive();
+                    });
+                }
+            });
+            // Periodic ping keeps the SW attentive during long sessions
+            keepAlivePingTimer = setInterval(() => {
+                if (keepAlivePort) {
+                    try { keepAlivePort.postMessage({ type: 'ping' }); } catch (_) {}
+                }
+            }, 15000);
+            chrome.runtime.sendMessage({ action: 'sessionKeepAlive', enabled: true }, () => {
+                void chrome.runtime.lastError;
+            });
+            console.log('HCDC keep-alive port connected (background-safe mode)');
+        } catch (e) {
+            console.log('Failed to open keep-alive port:', e);
+        }
+    }
+
+    function stopKeepAlive() {
+        if (keepAlivePingTimer) {
+            clearInterval(keepAlivePingTimer);
+            keepAlivePingTimer = null;
+        }
+        if (keepAlivePort) {
+            try { keepAlivePort.disconnect(); } catch (_) {}
+            keepAlivePort = null;
+        }
+        try {
+            chrome.runtime.sendMessage({ action: 'sessionKeepAlive', enabled: false }, () => {
+                void chrome.runtime.lastError;
+            });
+        } catch (_) {}
+    }
+
     // Function to update progress bar in status indicator
     function updateProgressBar(completed, total, downloaded, skipped) {
         const progressContainer = document.getElementById('hcdc-progress-container');
@@ -75,7 +145,8 @@
         debugMode = !!persisted.debugMode;
         baseClickDelay = persisted.baseClickDelay || baseClickDelay;
         if (debugMode) maxConcurrentDownloads = 1;
-        setTimeout(() => startProcessing(), 0); // start once helpers are defined
+        // Queue after helpers are defined; delay runs in SW when available
+        Promise.resolve().then(() => startProcessing());
     }
 
     // Rate limiting functions
@@ -483,13 +554,13 @@
             // searches download HISTORY, not actual files on disk, causing false positives
             console.log(`Processing document ${docInfo.number}, opening URL: ${fullUrl.substring(0, 100)}...`);
 
-            // Check rate limiting before processing
-            function attemptDocumentProcessing() {
+            // Check rate limiting before processing (delays run in the service worker)
+            async function attemptDocumentProcessing() {
                 if (!canMakeRequest()) {
                     const waitTime = getTimeUntilNextRequest();
                     console.log(`Rate limit reached, waiting ${Math.ceil(waitTime/1000)}s before processing document ${docInfo.number}`);
-                    setTimeout(attemptDocumentProcessing, waitTime + 1000); // Add 1s buffer
-                    return;
+                    await bgDelay(waitTime + 1000); // Add 1s buffer
+                    return attemptDocumentProcessing();
                 }
 
                 recordRequest(); // Record this request
@@ -540,8 +611,8 @@
                 });
             }
 
-            // Add humanlike pause before attempting processing
-            setTimeout(attemptDocumentProcessing, getHumanlikeDelay());
+            // Humanlike pause in the SW so it still fires when this tab is backgrounded
+            bgDelay(getHumanlikeDelay()).then(() => attemptDocumentProcessing());
         } catch (error) {
             console.error('Error processing document:', error);
             callback(false, false);
@@ -596,7 +667,7 @@
             // Check for next page when all documents are processed
             if (isRunning && currentIndex >= documentLinks.length && activeDownloads === 0) {
                 console.log(`All documents on current page processed (${totalProcessedCount} total). Checking for next page...`);
-                setTimeout(checkForNextPage, 1000);
+                bgDelay(1000).then(() => checkForNextPage());
             }
         });
     }
@@ -608,7 +679,7 @@
         const now = Date.now();
         if (now - lastPageChangeTime < 10000) {
             console.log('Preventing rapid page change, waiting...');
-            setTimeout(checkForNextPage, 10000 - (now - lastPageChangeTime));
+            bgDelay(10000 - (now - lastPageChangeTime)).then(() => checkForNextPage());
             return;
         }
         
@@ -620,12 +691,12 @@
             const targetPageNumber = currentPageNumber + 1;
 
             // Check rate limiting before navigation
-            function attemptPageNavigation() {
+            async function attemptPageNavigation() {
                 if (!canMakeRequest()) {
                     const waitTime = getTimeUntilNextRequest();
                     console.log(`Rate limit reached, waiting ${Math.ceil(waitTime/1000)}s before navigating to next page`);
-                    setTimeout(attemptPageNavigation, waitTime + 1000); // Add 1s buffer
-                    return;
+                    await bgDelay(waitTime + 1000); // Add 1s buffer
+                    return attemptPageNavigation();
                 }
                 
                 recordRequest(); // Record this request
@@ -657,11 +728,11 @@
                     nextButton.click();
                 }
 
-                setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber), getRandomDelay(5000));
+                bgDelay(getRandomDelay(5000)).then(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber));
             }
 
-            // Delay before navigation for humanlike behaviour (increased delay)
-            setTimeout(attemptPageNavigation, getRandomDelay());
+            // Delay before navigation for humanlike behaviour (runs in SW)
+            bgDelay(getRandomDelay()).then(() => attemptPageNavigation());
         } else {
             console.log('No next page found, processing complete');
             stopProcessing();
@@ -669,7 +740,7 @@
     }
 
     // Verify that a new page has actually loaded before restarting processing
-    function checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount = 0) {
+    async function checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount = 0) {
         // Emergency brake
         if (checkEmergencyConditions()) {
             triggerEmergencyStop('Emergency conditions met during page check');
@@ -689,8 +760,8 @@
         if (currentUrl === previousUrl && newLinks.length === previousDocCount) {
             if (retryCount < MAX_RETRIES_PER_OPERATION) {
                 console.log(`Page hasn't changed yet, retrying... (${retryCount + 1}/${MAX_RETRIES_PER_OPERATION})`);
-                setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount + 1), 1000);
-                return;
+                await bgDelay(1000);
+                return checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount + 1);
             } else {
                 console.log(`Page failed to change after ${MAX_RETRIES_PER_OPERATION} retries, stopping`);
                 stopProcessing();
@@ -715,7 +786,8 @@
             processNextDocument();
         } else {
             if (retryCount < MAX_RETRIES_PER_OPERATION) {
-                setTimeout(() => checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount + 1), 500);
+                await bgDelay(500);
+                return checkForNewPage(previousUrl, previousDocCount, targetPageNumber, retryCount + 1);
             } else {
                 console.log(`No documents found on new page after ${MAX_RETRIES_PER_OPERATION} retries, stopping`);
                 stopProcessing();
@@ -785,7 +857,10 @@
         emergencyStopTriggered = false;
         processingDocument = false; // Initialize processing flag
 
-        console.log('HCDC Auto Clicker: Starting document processing...');
+        console.log('HCDC Auto Clicker: Starting document processing (background-safe)...');
+
+        // Hold a port open so the service worker stays alive while we run
+        startKeepAlive();
         
         // Get case number for folder naming
         const caseNumber = getCaseNumber();
@@ -838,6 +913,7 @@
         activeDownloads = 0;
         documentLinks = [];
         pageProcessingStartTime = 0;
+        stopKeepAlive();
 
         // Update status indicator
         const startBtn = document.getElementById('hcdc-start-btn');
@@ -890,8 +966,8 @@
                 baseClickDelay = state.baseClickDelay || 5000;
                 maxConcurrentDownloads = debugMode ? 1 : 1; // Keep serial processing
                 
-                // Small delay to let page settle before resuming
-                setTimeout(startProcessing, 2000);
+                // Small delay to let page settle before resuming (SW timer)
+                bgDelay(2000).then(() => startProcessing());
             }
         } catch (e) {
             console.log('HCDC Auto Clicker: Failed to parse saved state:', e);
@@ -916,7 +992,7 @@
         statusBox.innerHTML = `
             <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
                 <span style="color: #28a745; font-weight: bold;">●</span>
-                <span>HCDC Auto Clicker v2.2</span>
+                <span>HCDC Auto Clicker v2.3</span>
                 <span id="hcdc-doc-count" style="background: #007bff; color: white; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: bold;">${docCount} documents</span>
                 <button id="hcdc-start-btn" style="
                     background: #28a745;
